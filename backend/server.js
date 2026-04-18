@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
+const Y = require('yjs');
 require('dotenv').config();
 
 const PORT = process.env.PORT || 4000;
@@ -36,7 +37,7 @@ const io = new Server(server, {
 // rooms = {
 //   roomId: {
 //     users: [{ socketId, username }],
-//     text: ''
+//     doc: Y.Doc
 //   }
 // }
 const rooms = new Map();
@@ -116,7 +117,7 @@ io.on('connection', (socket) => {
 
     rooms.set(roomId, {
       users: [],
-      text: '',
+      doc: new Y.Doc(),
     });
 
     if (typeof ack === 'function') {
@@ -181,16 +182,17 @@ io.on('connection', (socket) => {
     socket.emit('text-update', room.text);
 
     if (typeof ack === 'function') {
+      const fullStateUpdate = Y.encodeStateAsUpdate(room.doc);
       ack({
         ok: true,
         roomId,
-        text: room.text,
+        initialYDoc: Array.from(fullStateUpdate),
         users: room.users.map((user) => user.username),
       });
     }
   });
 
-  socket.on('text-change', (payload) => {
+  socket.on('yjs-update', (payload) => {
     const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
 
     if (!roomId || !rooms.has(roomId)) {
@@ -202,9 +204,40 @@ io.on('connection', (socket) => {
     }
 
     const room = rooms.get(roomId);
-    room.text = typeof payload?.text === 'string' ? payload.text : '';
+    const updateArray = payload?.update;
 
-    socket.to(roomId).emit('text-update', room.text);
+    if (!Array.isArray(updateArray)) {
+      return;
+    }
+
+    const update = Uint8Array.from(updateArray);
+    Y.applyUpdate(room.doc, update);
+
+    socket.to(roomId).emit('yjs-update', {
+      roomId,
+      update: updateArray,
+    });
+  });
+
+  socket.on('awareness-update', (payload) => {
+    const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
+
+    if (!roomId || !rooms.has(roomId)) {
+      return;
+    }
+
+    if (socket.data.roomId !== roomId) {
+      return;
+    }
+
+    if (!Array.isArray(payload?.update)) {
+      return;
+    }
+
+    socket.to(roomId).emit('awareness-update', {
+      roomId,
+      update: payload.update,
+    });
   });
 
   socket.on('typing', (payload) => {
