@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
+import Quill from 'quill';
+import QuillCursors from 'quill-cursors';
+import { QuillBinding } from 'y-quill';
 import * as Y from 'yjs';
+import {
+  Awareness,
+  applyAwarenessUpdate,
+  encodeAwarenessUpdate,
+} from 'y-protocols/awareness';
+import 'quill/dist/quill.snow.css';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000';
 const USERNAME_STORAGE_KEY = 'talkroom_username';
@@ -28,53 +37,32 @@ type RoomBroadcastPayload = {
   update: number[];
 };
 
-const applyTextDiff = (ytext: Y.Text, previousText: string, nextText: string) => {
-  if (previousText === nextText) {
-    return;
+const ROOM_COLORS = ['#0891b2', '#2563eb', '#7c3aed', '#c2410c', '#059669', '#be123c'];
+
+const getUserColor = (username: string) => {
+  let hash = 0;
+  for (let i = 0; i < username.length; i += 1) {
+    hash = (hash << 5) - hash + username.charCodeAt(i);
+    hash |= 0;
   }
 
-  let start = 0;
-  while (
-    start < previousText.length &&
-    start < nextText.length &&
-    previousText[start] === nextText[start]
-  ) {
-    start += 1;
-  }
-
-  let previousEnd = previousText.length - 1;
-  let nextEnd = nextText.length - 1;
-
-  while (
-    previousEnd >= start &&
-    nextEnd >= start &&
-    previousText[previousEnd] === nextText[nextEnd]
-  ) {
-    previousEnd -= 1;
-    nextEnd -= 1;
-  }
-
-  const deleteLength = previousEnd - start + 1;
-  const insertText = nextText.slice(start, nextEnd + 1);
-
-  if (deleteLength > 0) {
-    ytext.delete(start, deleteLength);
-  }
-
-  if (insertText.length > 0) {
-    ytext.insert(start, insertText);
-  }
+  return ROOM_COLORS[Math.abs(hash) % ROOM_COLORS.length];
 };
+
+if (!(Quill as { imports?: Record<string, unknown> }).imports?.['modules/cursors']) {
+  Quill.register('modules/cursors', QuillCursors);
+}
 
 function App() {
   const socketRef = useRef<Socket | null>(null);
+  const usernameRef = useRef('');
   const joinedRoomIdRef = useRef('');
 
-  const yDocRef = useRef<Y.Doc | null>(null);
-  const yTextRef = useRef<Y.Text | null>(null);
-  const collabCleanupRef = useRef<(() => void) | null>(null);
+  const quillContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const editorTextRef = useRef('');
+  const yDocRef = useRef<Y.Doc | null>(null);
+  const awarenessRef = useRef<Awareness | null>(null);
+  const collabCleanupRef = useRef<(() => void) | null>(null);
 
   const [screen, setScreen] = useState<Screen>('home');
   const [connected, setConnected] = useState(false);
@@ -88,19 +76,18 @@ function App() {
   const [joinedRoomId, setJoinedRoomId] = useState('');
 
   const [users, setUsers] = useState<string[]>([]);
-  const [editorText, setEditorText] = useState('');
 
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    joinedRoomIdRef.current = joinedRoomId;
-  }, [joinedRoomId]);
+    usernameRef.current = username.trim();
+  }, [username]);
 
   useEffect(() => {
-    editorTextRef.current = editorText;
-  }, [editorText]);
+    joinedRoomIdRef.current = joinedRoomId;
+  }, [joinedRoomId]);
 
   const destroyCollaboration = useCallback(() => {
     if (collabCleanupRef.current) {
@@ -112,13 +99,15 @@ function App() {
   const initCollaboration = useCallback(
     (roomId: string, initialYDoc: number[]) => {
       const socket = socketRef.current;
+      const container = quillContainerRef.current;
 
-      if (!socket) {
-        setErrorMessage('Socket is not ready yet.');
+      if (!socket || !container) {
+        setErrorMessage('Editor is not ready yet. Please rejoin the room once.');
         return;
       }
 
       destroyCollaboration();
+      container.innerHTML = '';
 
       const ydoc = new Y.Doc();
       if (Array.isArray(initialYDoc) && initialYDoc.length > 0) {
@@ -126,6 +115,30 @@ function App() {
       }
 
       const ytext = ydoc.getText('shared-note');
+      const awareness = new Awareness(ydoc);
+
+      awareness.setLocalStateField('user', {
+        name: usernameRef.current || 'Guest',
+        color: getUserColor(usernameRef.current || 'Guest'),
+      });
+
+      const quill = new Quill(container, {
+        theme: 'snow',
+        modules: {
+          toolbar: false,
+          cursors: {
+            hideDelayMs: 2200,
+            hideSpeedMs: 300,
+            transformOnTextChange: true,
+          },
+          history: {
+            userOnly: true,
+          },
+        },
+        placeholder: 'Start writing your shared document...',
+      });
+
+      const binding = new QuillBinding(ytext, quill, awareness);
 
       const onDocUpdate = (update: Uint8Array, origin: unknown) => {
         if (origin === 'remote') {
@@ -138,28 +151,36 @@ function App() {
         });
       };
 
-      const onTextChange = () => {
-        const nextText = ytext.toString();
-        editorTextRef.current = nextText;
-        setEditorText(nextText);
+      const onAwarenessUpdate = ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
+        const changedClients = [...added, ...updated, ...removed];
+
+        if (changedClients.length === 0) {
+          return;
+        }
+
+        const update = encodeAwarenessUpdate(awareness, changedClients);
+        socket.emit('awareness-update', {
+          roomId,
+          update: Array.from(update),
+        });
       };
 
       ydoc.on('update', onDocUpdate);
-      ytext.observe(onTextChange);
-
-      const initialText = ytext.toString();
-      editorTextRef.current = initialText;
-      setEditorText(initialText);
+      awareness.on('update', onAwarenessUpdate);
 
       yDocRef.current = ydoc;
-      yTextRef.current = ytext;
+      awarenessRef.current = awareness;
 
       collabCleanupRef.current = () => {
-        ytext.unobserve(onTextChange);
+        awareness.off('update', onAwarenessUpdate);
         ydoc.off('update', onDocUpdate);
+        binding.destroy();
+        awareness.destroy();
         ydoc.destroy();
+        container.innerHTML = '';
+
         yDocRef.current = null;
-        yTextRef.current = null;
+        awarenessRef.current = null;
       };
     },
     [destroyCollaboration],
@@ -202,10 +223,27 @@ function App() {
       Y.applyUpdate(yDocRef.current, Uint8Array.from(payload.update), 'remote');
     };
 
+    const handleAwarenessUpdate = (payload: RoomBroadcastPayload) => {
+      if (!payload?.roomId || payload.roomId !== joinedRoomIdRef.current) {
+        return;
+      }
+
+      if (!Array.isArray(payload.update) || !awarenessRef.current) {
+        return;
+      }
+
+      applyAwarenessUpdate(
+        awarenessRef.current,
+        Uint8Array.from(payload.update),
+        'remote',
+      );
+    };
+
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('users-update', handleUsersUpdate);
     socket.on('yjs-update', handleYjsUpdate);
+    socket.on('awareness-update', handleAwarenessUpdate);
 
     return () => {
       socket.emit('leave-room');
@@ -213,10 +251,22 @@ function App() {
       socket.off('disconnect', handleDisconnect);
       socket.off('users-update', handleUsersUpdate);
       socket.off('yjs-update', handleYjsUpdate);
+      socket.off('awareness-update', handleAwarenessUpdate);
       socket.disconnect();
       destroyCollaboration();
     };
   }, [destroyCollaboration]);
+
+  useEffect(() => {
+    if (!awarenessRef.current || !username.trim()) {
+      return;
+    }
+
+    awarenessRef.current.setLocalStateField('user', {
+      name: username.trim(),
+      color: getUserColor(username.trim()),
+    });
+  }, [username]);
 
   const normalizedCreateRoomCode = useMemo(
     () => createRoomInput.trim().toUpperCase(),
@@ -287,7 +337,9 @@ function App() {
           setScreen('room');
           setStatusMessage('Joined room successfully');
 
-          initCollaboration(ack.roomId || normalized, ack.initialYDoc || []);
+          setTimeout(() => {
+            initCollaboration(ack.roomId || normalized, ack.initialYDoc || []);
+          }, 0);
         },
       );
     },
@@ -352,25 +404,6 @@ function App() {
     }
   }, [createdRoomId, joinedRoomId, normalizedJoinRoomCode]);
 
-  const handleEditorChange = useCallback((nextText: string) => {
-    setEditorText(nextText);
-
-    const ytext = yTextRef.current;
-    const ydoc = yDocRef.current;
-
-    if (!ytext || !ydoc) {
-      return;
-    }
-
-    const previousText = editorTextRef.current;
-
-    ydoc.transact(() => {
-      applyTextDiff(ytext, previousText, nextText);
-    }, 'local');
-
-    editorTextRef.current = nextText;
-  }, []);
-
   const goHome = useCallback(() => {
     socketRef.current?.emit('leave-room');
     destroyCollaboration();
@@ -378,18 +411,16 @@ function App() {
     setScreen('home');
     setJoinedRoomId('');
     setUsers([]);
-    setEditorText('');
-    editorTextRef.current = '';
     setStatusMessage('');
     setErrorMessage('');
   }, [destroyCollaboration]);
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_0%_0%,_#d1fae5,_#ecfeff_44%,_#f8fafc_100%)] px-4 py-8 font-sans text-slate-800 md:py-12">
-      <section className="mx-auto w-full max-w-5xl rounded-3xl border border-slate-200 bg-white p-6 shadow-panel md:p-8">
+      <section className="mx-auto w-full max-w-6xl rounded-3xl border border-slate-200 bg-white p-6 shadow-panel md:p-8">
         <header className="mb-6 border-b border-slate-100 pb-4">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-600">TalkRoom</p>
-          <h1 className="text-2xl font-bold text-slate-900">Collaborative Notepad</h1>
+          <h1 className="text-2xl font-bold text-slate-900">Collaborative Document</h1>
         </header>
 
         {screen === 'home' ? (
@@ -535,15 +566,12 @@ function App() {
               </button>
             </aside>
 
-            <div className="rounded-2xl border border-slate-200 bg-white p-4">
-              <textarea
-                value={editorText}
-                onChange={(event) => handleEditorChange(event.target.value)}
-                placeholder="Start writing your document..."
-                className="h-[56vh] min-h-[320px] w-full resize-none rounded-xl border border-slate-200 bg-white p-4 text-base leading-7 text-slate-800 outline-none ring-brand-500 transition focus:ring-2"
-              />
+            <div className="rounded-2xl border border-slate-200 bg-slate-100 p-4">
+              <div className="doc-editor mx-auto max-w-3xl rounded-xl bg-white shadow-sm">
+                <div ref={quillContainerRef} className="doc-editor-surface" />
+              </div>
               <p className="mt-2 text-sm text-slate-500">
-                Real-time collaborative document editing with conflict-free sync.
+                Click anywhere in the page and write together. Live cursor names are visible while typing.
               </p>
             </div>
           </div>

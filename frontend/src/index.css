@@ -18,3 +18,27 @@ body,
 body {
   min-height: 100vh;
 }
+
+.doc-editor .ql-container {
+  border: 0;
+  font-family: 'Plus Jakarta Sans', 'Segoe UI', sans-serif;
+  font-size: 16px;
+}
+
+.doc-editor .ql-editor {
+  min-height: 72vh;
+  padding: 44px 52px;
+  line-height: 1.75;
+  color: #0f172a;
+}
+
+.doc-editor .ql-editor.ql-blank::before {
+  left: 52px;
+  right: 52px;
+  font-style: normal;
+  color: #94a3b8;
+}
+
+.ql-cursor-caret {
+  width: 2px !important;
+}
