@@ -37,6 +37,11 @@ type RoomBroadcastPayload = {
   update: number[];
 };
 
+type PendingEditorInit = {
+  roomId: string;
+  initialYDoc: number[];
+};
+
 const ROOM_COLORS = ['#0891b2', '#2563eb', '#7c3aed', '#c2410c', '#059669', '#be123c'];
 
 const getUserColor = (username: string) => {
@@ -59,6 +64,7 @@ function App() {
   const joinedRoomIdRef = useRef('');
 
   const quillContainerRef = useRef<HTMLDivElement | null>(null);
+  const [quillContainerEl, setQuillContainerEl] = useState<HTMLDivElement | null>(null);
 
   const yDocRef = useRef<Y.Doc | null>(null);
   const awarenessRef = useRef<Awareness | null>(null);
@@ -76,6 +82,7 @@ function App() {
   const [joinedRoomId, setJoinedRoomId] = useState('');
 
   const [users, setUsers] = useState<string[]>([]);
+  const [pendingEditorInit, setPendingEditorInit] = useState<PendingEditorInit | null>(null);
 
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
@@ -96,14 +103,18 @@ function App() {
     }
   }, []);
 
+  const setQuillContainerNode = useCallback((node: HTMLDivElement | null) => {
+    quillContainerRef.current = node;
+    setQuillContainerEl(node);
+  }, []);
+
   const initCollaboration = useCallback(
     (roomId: string, initialYDoc: number[]) => {
       const socket = socketRef.current;
       const container = quillContainerRef.current;
 
       if (!socket || !container) {
-        setErrorMessage('Editor is not ready yet. Please rejoin the room once.');
-        return;
+        return false;
       }
 
       destroyCollaboration();
@@ -182,9 +193,27 @@ function App() {
         yDocRef.current = null;
         awarenessRef.current = null;
       };
+
+      return true;
     },
     [destroyCollaboration],
   );
+
+  useEffect(() => {
+    if (screen !== 'room' || !pendingEditorInit || !quillContainerEl) {
+      return;
+    }
+
+    const ready = initCollaboration(
+      pendingEditorInit.roomId,
+      pendingEditorInit.initialYDoc,
+    );
+
+    if (ready) {
+      setPendingEditorInit(null);
+      setErrorMessage('');
+    }
+  }, [initCollaboration, pendingEditorInit, quillContainerEl, screen]);
 
   useEffect(() => {
     const storedName = localStorage.getItem(USERNAME_STORAGE_KEY);
@@ -336,14 +365,14 @@ function App() {
           setUsers(Array.isArray(ack.users) ? ack.users : []);
           setScreen('room');
           setStatusMessage('Joined room successfully');
-
-          setTimeout(() => {
-            initCollaboration(ack.roomId || normalized, ack.initialYDoc || []);
-          }, 0);
+          setPendingEditorInit({
+            roomId: ack.roomId || normalized,
+            initialYDoc: ack.initialYDoc || [],
+          });
         },
       );
     },
-    [connected, initCollaboration, username, validateRoomCode, validateUsername],
+    [connected, username, validateRoomCode, validateUsername],
   );
 
   const handleCreateRoom = useCallback(() => {
@@ -411,6 +440,7 @@ function App() {
     setScreen('home');
     setJoinedRoomId('');
     setUsers([]);
+    setPendingEditorInit(null);
     setStatusMessage('');
     setErrorMessage('');
   }, [destroyCollaboration]);
@@ -568,7 +598,7 @@ function App() {
 
             <div className="rounded-2xl border border-slate-200 bg-slate-100 p-4">
               <div className="doc-editor mx-auto max-w-3xl rounded-xl bg-white shadow-sm">
-                <div ref={quillContainerRef} className="doc-editor-surface" />
+                <div ref={setQuillContainerNode} className="doc-editor-surface" />
               </div>
               <p className="mt-2 text-sm text-slate-500">
                 Click anywhere in the page and write together. Live cursor names are visible while typing.
