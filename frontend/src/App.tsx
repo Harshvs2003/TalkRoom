@@ -318,6 +318,19 @@ function App() {
   );
 
   useEffect(() => {
+    if (appScreen !== 'room' || !roomState) {
+      return;
+    }
+
+    // Ensure editors bind after React has mounted any newly added doc containers.
+    const timer = setTimeout(() => {
+      roomState.docs.forEach((doc) => bindEditorToDoc(doc.id));
+    }, 0);
+
+    return () => clearTimeout(timer);
+  }, [appScreen, bindEditorToDoc, roomState]);
+
+  useEffect(() => {
     const storedName = localStorage.getItem(USERNAME_STORAGE_KEY);
     if (storedName) {
       setUsername(storedName);
@@ -345,7 +358,6 @@ function App() {
     const handleRoomState = (nextRoomState: RoomState) => {
       ensureDocModels(nextRoomState);
       setRoomState(nextRoomState);
-      nextRoomState.docs.forEach((doc) => bindEditorToDoc(doc.id));
     };
 
     const handleYjsUpdate = (payload: RealtimePayload) => {
@@ -501,12 +513,10 @@ function App() {
           setUsers(Array.isArray(ack.users) ? ack.users : []);
           setAppScreen('room');
           setStatusMessage('Joined room successfully');
-
-          ack.roomState.docs.forEach((doc) => bindEditorToDoc(doc.id));
         },
       );
     },
-    [bindEditorToDoc, connected, destroyAllDocs, ensureDocModels, username, validateRoomCode, validateUsername],
+    [connected, destroyAllDocs, ensureDocModels, username, validateRoomCode, validateUsername],
   );
 
   const handleCreateRoom = useCallback(() => {
@@ -590,11 +600,10 @@ function App() {
 
         ensureDocModels(ack.roomState);
         setRoomState(ack.roomState);
-        ack.roomState.docs.forEach((doc) => bindEditorToDoc(doc.id));
         setStatusMessage(`Mode switched to ${viewMode.replace(/_/g, ' ')}`);
       });
     },
-    [bindEditorToDoc, ensureDocModels, isHost, joinedRoomId],
+    [ensureDocModels, isHost, joinedRoomId],
   );
 
   const goHome = useCallback(() => {
