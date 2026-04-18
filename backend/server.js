@@ -6,6 +6,7 @@ require('dotenv').config();
 
 const PORT = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const ROOM_ID_LENGTH = 6;
 
 const app = express();
 const server = http.createServer(app);
@@ -31,94 +32,208 @@ const io = new Server(server, {
   },
 });
 
+// In-memory room store:
+// rooms = {
+//   roomId: {
+//     users: [{ socketId, username }],
+//     text: ''
+//   }
+// }
 const rooms = new Map();
 
-const ensureRoom = (roomId) => {
-  if (!rooms.has(roomId)) {
-    rooms.set(roomId, {
-      content: '',
-      users: new Set(),
-    });
+const generateRoomId = () => {
+  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+  return Array.from({ length: ROOM_ID_LENGTH }, () => {
+    const randomIndex = Math.floor(Math.random() * characters.length);
+    return characters[randomIndex];
+  }).join('');
+};
+
+const createUniqueRoomId = () => {
+  let roomId = generateRoomId();
+
+  while (rooms.has(roomId)) {
+    roomId = generateRoomId();
   }
 
-  return rooms.get(roomId);
+  return roomId;
 };
 
-const emitUserCount = (roomId) => {
+const normalizeRoomId = (value) => String(value || '').trim().toUpperCase();
+const normalizeUsername = (value) => String(value || '').trim();
+
+const emitUsersUpdate = (roomId) => {
   const room = rooms.get(roomId);
-  const count = room ? room.users.size : 0;
-  io.to(roomId).emit('users-count', count);
-};
 
-const leaveRoom = (socket) => {
-  const currentRoomId = socket.data.roomId;
-
-  if (!currentRoomId || !rooms.has(currentRoomId)) {
+  if (!room) {
     return;
   }
 
-  const room = rooms.get(currentRoomId);
-  room.users.delete(socket.id);
-  socket.leave(currentRoomId);
+  const usernames = room.users.map((user) => user.username);
+  io.to(roomId).emit('users-update', usernames);
+};
 
-  if (room.users.size === 0) {
-    rooms.delete(currentRoomId);
-  } else {
-    emitUserCount(currentRoomId);
+const leaveCurrentRoom = (socket) => {
+  const roomId = socket.data.roomId;
+
+  if (!roomId || !rooms.has(roomId)) {
+    return;
   }
 
+  const room = rooms.get(roomId);
+  room.users = room.users.filter((user) => user.socketId !== socket.id);
+
+  socket.leave(roomId);
+  emitUsersUpdate(roomId);
+
   socket.data.roomId = null;
+  socket.data.username = null;
 };
 
 io.on('connection', (socket) => {
-  socket.on('join-room', (rawRoomId, ack) => {
-    const roomId = String(rawRoomId || '')
-      .trim()
-      .toUpperCase();
+  socket.on('create-room', (payload, ack) => {
+    const requestedRoomId = normalizeRoomId(payload?.roomId);
+    let roomId = requestedRoomId;
+
+    if (requestedRoomId) {
+      if (!/^[A-Z0-9]{3,12}$/.test(requestedRoomId)) {
+        if (typeof ack === 'function') {
+          ack({ ok: false, error: 'Invalid room code' });
+        }
+        return;
+      }
+
+      if (rooms.has(requestedRoomId)) {
+        if (typeof ack === 'function') {
+          ack({ ok: false, error: 'Room already exists' });
+        }
+        return;
+      }
+    } else {
+      roomId = createUniqueRoomId();
+    }
+
+    rooms.set(roomId, {
+      users: [],
+      text: '',
+    });
+
+    if (typeof ack === 'function') {
+      ack({ ok: true, roomId, message: 'Room Created' });
+    }
+  });
+
+  socket.on('join-room', (payload, ack) => {
+    const roomId = normalizeRoomId(payload?.roomId);
+    const username = normalizeUsername(payload?.username);
 
     if (!/^[A-Z0-9]{3,12}$/.test(roomId)) {
       if (typeof ack === 'function') {
-        ack({ ok: false, error: 'Invalid room id' });
+        ack({ ok: false, error: 'Invalid room code' });
+      }
+      return;
+    }
+
+    if (!username) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Username is required' });
+      }
+      return;
+    }
+
+    if (!rooms.has(roomId)) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Room does not exist' });
       }
       return;
     }
 
     if (socket.data.roomId && socket.data.roomId !== roomId) {
-      leaveRoom(socket);
+      leaveCurrentRoom(socket);
     }
 
-    const room = ensureRoom(roomId);
-    socket.join(roomId);
-    room.users.add(socket.id);
-    socket.data.roomId = roomId;
+    const room = rooms.get(roomId);
+    const usernameTaken = room.users.some(
+      (user) => user.username.toLowerCase() === username.toLowerCase(),
+    );
 
-    socket.emit('receive-changes', room.content);
-    emitUserCount(roomId);
+    if (usernameTaken) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Username already exists in this room' });
+      }
+      return;
+    }
+
+    // If same socket re-joins same room, remove stale entry before adding again.
+    room.users = room.users.filter((user) => user.socketId !== socket.id);
+
+    room.users.push({
+      socketId: socket.id,
+      username,
+    });
+
+    socket.join(roomId);
+    socket.data.roomId = roomId;
+    socket.data.username = username;
+
+    emitUsersUpdate(roomId);
+    socket.emit('text-update', room.text);
 
     if (typeof ack === 'function') {
-      ack({ ok: true, roomId, content: room.content, usersCount: room.users.size });
+      ack({
+        ok: true,
+        roomId,
+        text: room.text,
+        users: room.users.map((user) => user.username),
+      });
     }
   });
 
-  socket.on('send-changes', (nextContent) => {
-    const roomId = socket.data.roomId;
+  socket.on('text-change', (payload) => {
+    const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
 
     if (!roomId || !rooms.has(roomId)) {
       return;
     }
 
-    const room = rooms.get(roomId);
-    room.content = typeof nextContent === 'string' ? nextContent : '';
+    if (socket.data.roomId !== roomId) {
+      return;
+    }
 
-    socket.to(roomId).emit('receive-changes', room.content);
+    const room = rooms.get(roomId);
+    room.text = typeof payload?.text === 'string' ? payload.text : '';
+
+    socket.to(roomId).emit('text-update', room.text);
+  });
+
+  socket.on('typing', (payload) => {
+    const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
+
+    if (!roomId || !rooms.has(roomId)) {
+      return;
+    }
+
+    if (socket.data.roomId !== roomId) {
+      return;
+    }
+
+    const username = normalizeUsername(payload?.username || socket.data.username);
+    const isTyping = Boolean(payload?.isTyping);
+
+    if (!username) {
+      return;
+    }
+
+    socket.to(roomId).emit('typing', { username, isTyping });
   });
 
   socket.on('leave-room', () => {
-    leaveRoom(socket);
+    leaveCurrentRoom(socket);
   });
 
   socket.on('disconnect', () => {
-    leaveRoom(socket);
+    leaveCurrentRoom(socket);
   });
 });
 
