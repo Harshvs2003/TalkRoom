@@ -38,6 +38,11 @@ type RoomBroadcastPayload = {
   update: number[];
 };
 
+type PendingEditorInit = {
+  roomId: string;
+  initialYDoc: number[];
+};
+
 const ROOM_COLORS = ['#0891b2', '#2563eb', '#7c3aed', '#c2410c', '#059669', '#be123c'];
 
 const getUserColor = (username: string) => {
@@ -73,6 +78,7 @@ function App() {
   const [joinedRoomId, setJoinedRoomId] = useState('');
 
   const [users, setUsers] = useState<string[]>([]);
+  const [pendingEditorInit, setPendingEditorInit] = useState<PendingEditorInit | null>(null);
 
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
@@ -182,6 +188,15 @@ function App() {
     },
     [destroyCollaboration],
   );
+
+  useEffect(() => {
+    if (screen !== 'room' || !pendingEditorInit || !editorContainerRef.current) {
+      return;
+    }
+
+    initCollaborationEditor(pendingEditorInit.roomId, pendingEditorInit.initialYDoc);
+    setPendingEditorInit(null);
+  }, [initCollaborationEditor, pendingEditorInit, screen]);
 
   useEffect(() => {
     const storedName = localStorage.getItem(USERNAME_STORAGE_KEY);
@@ -333,14 +348,14 @@ function App() {
           setUsers(Array.isArray(ack.users) ? ack.users : []);
           setScreen('room');
           setStatusMessage('Joined room successfully');
-
-          setTimeout(() => {
-            initCollaborationEditor(ack.roomId || normalized, ack.initialYDoc || []);
-          }, 0);
+          setPendingEditorInit({
+            roomId: ack.roomId || normalized,
+            initialYDoc: ack.initialYDoc || [],
+          });
         },
       );
     },
-    [connected, initCollaborationEditor, username, validateRoomCode, validateUsername],
+    [connected, username, validateRoomCode, validateUsername],
   );
 
   const handleCreateRoom = useCallback(() => {
@@ -408,6 +423,7 @@ function App() {
     setScreen('home');
     setJoinedRoomId('');
     setUsers([]);
+    setPendingEditorInit(null);
     setStatusMessage('');
     setErrorMessage('');
   }, [destroyCollaboration]);
