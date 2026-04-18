@@ -8,7 +8,6 @@ require('dotenv').config();
 const PORT = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const ROOM_ID_LENGTH = 6;
-const SCREEN_ID_LENGTH = 8;
 
 const app = express();
 const server = http.createServer(app);
@@ -34,14 +33,6 @@ const io = new Server(server, {
   },
 });
 
-// rooms = {
-//   roomId: {
-//     users: [{ socketId, username }],
-//     hostUsername: string,
-//     mode: 'single_shared' | 'one_each',
-//     screens: [{ id, name, type, ownerUsername, doc: Y.Doc }]
-//   }
-// }
 const rooms = new Map();
 
 const generateCode = (length) => {
@@ -63,30 +54,23 @@ const createUniqueRoomId = () => {
   return roomId;
 };
 
-const createScreenId = (room) => {
-  let screenId = generateCode(SCREEN_ID_LENGTH);
-
-  while (room.screens.some((screen) => screen.id === screenId)) {
-    screenId = generateCode(SCREEN_ID_LENGTH);
-  }
-
-  return screenId;
-};
-
 const normalizeRoomId = (value) => String(value || '').trim().toUpperCase();
 const normalizeUsername = (value) => String(value || '').trim();
 
-const toPublicScreen = (screen) => ({
-  id: screen.id,
-  name: screen.name,
-  type: screen.type,
-  ownerUsername: screen.ownerUsername || null,
+const sharedDocId = 'shared-main';
+const personalDocId = (username) => `personal-${username.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+
+const toPublicDoc = (doc) => ({
+  id: doc.id,
+  name: doc.name,
+  type: doc.type,
+  ownerUsername: doc.ownerUsername || null,
 });
 
 const toPublicRoomState = (room) => ({
   hostUsername: room.hostUsername,
-  mode: room.mode,
-  screens: room.screens.map(toPublicScreen),
+  viewMode: room.viewMode,
+  docs: room.docs.map(toPublicDoc),
 });
 
 const emitUsersUpdate = (roomId) => {
@@ -112,60 +96,32 @@ const emitRoomState = (roomId) => {
   io.to(roomId).emit('room-state', toPublicRoomState(room));
 };
 
-const createScreen = (room, options) => {
-  const screen = {
-    id: createScreenId(room),
-    name: options.name,
-    type: options.type,
-    ownerUsername: options.ownerUsername || null,
-    doc: new Y.Doc(),
-  };
-
-  room.screens.push(screen);
-  return screen;
-};
-
-const ensurePersonalScreen = (room, username) => {
-  const existing = room.screens.find(
-    (screen) => screen.type === 'personal' && screen.ownerUsername === username,
-  );
+const ensurePersonalDoc = (room, username) => {
+  const docId = personalDocId(username);
+  const existing = room.docs.find((doc) => doc.id === docId);
 
   if (existing) {
     return existing;
   }
 
-  return createScreen(room, {
-    name: `${username}'s Screen`,
+  const doc = {
+    id: docId,
+    name: `${username}'s Card`,
     type: 'personal',
     ownerUsername: username,
-  });
+    ydoc: new Y.Doc(),
+  };
+
+  room.docs.push(doc);
+  return doc;
 };
 
-const canEditScreen = (screen, username) => {
-  if (screen.type === 'shared') {
+const canEditDoc = (doc, username) => {
+  if (doc.type === 'shared') {
     return true;
   }
 
-  return screen.ownerUsername === username;
-};
-
-const getDefaultScreenForUser = (room, username) => {
-  if (room.mode === 'one_each') {
-    const personal = room.screens.find(
-      (screen) => screen.type === 'personal' && screen.ownerUsername === username,
-    );
-
-    if (personal) {
-      return personal;
-    }
-  }
-
-  const firstShared = room.screens.find((screen) => screen.type === 'shared');
-  if (firstShared) {
-    return firstShared;
-  }
-
-  return room.screens[0] || null;
+  return doc.ownerUsername === username;
 };
 
 const leaveCurrentRoom = (socket) => {
@@ -228,20 +184,20 @@ io.on('connection', (socket) => {
       roomId = createUniqueRoomId();
     }
 
-    const room = {
+    rooms.set(roomId, {
       users: [],
       hostUsername,
-      mode: 'single_shared',
-      screens: [],
-    };
-
-    createScreen(room, {
-      name: 'Shared Screen 1',
-      type: 'shared',
-      ownerUsername: null,
+      viewMode: 'single_shared',
+      docs: [
+        {
+          id: sharedDocId,
+          name: 'Shared Screen',
+          type: 'shared',
+          ownerUsername: null,
+          ydoc: new Y.Doc(),
+        },
+      ],
     });
-
-    rooms.set(roomId, room);
 
     if (typeof ack === 'function') {
       ack({ ok: true, roomId, message: 'Room Created' });
@@ -292,9 +248,7 @@ io.on('connection', (socket) => {
     room.users = room.users.filter((user) => user.socketId !== socket.id);
     room.users.push({ socketId: socket.id, username });
 
-    if (room.mode === 'one_each') {
-      ensurePersonalScreen(room, username);
-    }
+    ensurePersonalDoc(room, username);
 
     socket.join(roomId);
     socket.data.roomId = roomId;
@@ -303,63 +257,23 @@ io.on('connection', (socket) => {
     emitUsersUpdate(roomId);
     emitRoomState(roomId);
 
-    const defaultScreen = getDefaultScreenForUser(room, username);
-    const initialYDoc = defaultScreen
-      ? Array.from(Y.encodeStateAsUpdate(defaultScreen.doc))
-      : [];
-
     if (typeof ack === 'function') {
       ack({
         ok: true,
         roomId,
         users: room.users.map((user) => user.username),
         roomState: toPublicRoomState(room),
-        defaultScreenId: defaultScreen ? defaultScreen.id : null,
-        initialYDoc,
+        docSnapshots: room.docs.map((doc) => ({
+          docId: doc.id,
+          update: Array.from(Y.encodeStateAsUpdate(doc.ydoc)),
+        })),
       });
     }
   });
 
-  socket.on('open-screen', (payload, ack) => {
+  socket.on('set-view-mode', (payload, ack) => {
     const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
-    const screenId = String(payload?.screenId || '').trim();
-
-    if (!roomId || !rooms.has(roomId) || !screenId) {
-      if (typeof ack === 'function') {
-        ack({ ok: false, error: 'Invalid screen request' });
-      }
-      return;
-    }
-
-    if (socket.data.roomId !== roomId) {
-      if (typeof ack === 'function') {
-        ack({ ok: false, error: 'Not a room member' });
-      }
-      return;
-    }
-
-    const room = rooms.get(roomId);
-    const screen = room.screens.find((item) => item.id === screenId);
-
-    if (!screen) {
-      if (typeof ack === 'function') {
-        ack({ ok: false, error: 'Screen not found' });
-      }
-      return;
-    }
-
-    if (typeof ack === 'function') {
-      ack({
-        ok: true,
-        screen: toPublicScreen(screen),
-        initialYDoc: Array.from(Y.encodeStateAsUpdate(screen.doc)),
-      });
-    }
-  });
-
-  socket.on('set-room-mode', (payload, ack) => {
-    const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
-    const mode = payload?.mode;
+    const viewMode = payload?.viewMode;
 
     if (!roomId || !rooms.has(roomId)) {
       if (typeof ack === 'function') {
@@ -379,26 +293,19 @@ io.on('connection', (socket) => {
 
     if (room.hostUsername !== socket.data.username) {
       if (typeof ack === 'function') {
-        ack({ ok: false, error: 'Only host can change mode' });
+        ack({ ok: false, error: 'Only host can change view mode' });
       }
       return;
     }
 
-    if (mode !== 'single_shared' && mode !== 'one_each') {
+    if (!['single_shared', 'one_each', 'both'].includes(viewMode)) {
       if (typeof ack === 'function') {
-        ack({ ok: false, error: 'Invalid mode' });
+        ack({ ok: false, error: 'Invalid view mode' });
       }
       return;
     }
 
-    room.mode = mode;
-
-    if (mode === 'one_each') {
-      room.users.forEach((user) => {
-        ensurePersonalScreen(room, user.username);
-      });
-    }
-
+    room.viewMode = viewMode;
     emitRoomState(roomId);
 
     if (typeof ack === 'function') {
@@ -406,57 +313,11 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('add-shared-screen', (payload, ack) => {
-    const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
-
-    if (!roomId || !rooms.has(roomId)) {
-      if (typeof ack === 'function') {
-        ack({ ok: false, error: 'Room not found' });
-      }
-      return;
-    }
-
-    if (socket.data.roomId !== roomId) {
-      if (typeof ack === 'function') {
-        ack({ ok: false, error: 'Not a room member' });
-      }
-      return;
-    }
-
-    const room = rooms.get(roomId);
-
-    if (room.hostUsername !== socket.data.username) {
-      if (typeof ack === 'function') {
-        ack({ ok: false, error: 'Only host can add shared screens' });
-      }
-      return;
-    }
-
-    const sharedCount = room.screens.filter((screen) => screen.type === 'shared').length;
-    const requestedName = String(payload?.name || '').trim();
-    const screenName = requestedName || `Shared Screen ${sharedCount + 1}`;
-
-    const screen = createScreen(room, {
-      name: screenName,
-      type: 'shared',
-      ownerUsername: null,
-    });
-
-    emitRoomState(roomId);
-
-    if (typeof ack === 'function') {
-      ack({
-        ok: true,
-        screen: toPublicScreen(screen),
-      });
-    }
-  });
-
   socket.on('yjs-update', (payload) => {
     const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
-    const screenId = String(payload?.screenId || '').trim();
+    const docId = String(payload?.docId || '').trim();
 
-    if (!roomId || !rooms.has(roomId) || !screenId) {
+    if (!roomId || !rooms.has(roomId) || !docId) {
       return;
     }
 
@@ -465,9 +326,9 @@ io.on('connection', (socket) => {
     }
 
     const room = rooms.get(roomId);
-    const screen = room.screens.find((item) => item.id === screenId);
+    const doc = room.docs.find((item) => item.id === docId);
 
-    if (!screen || !canEditScreen(screen, socket.data.username)) {
+    if (!doc || !canEditDoc(doc, socket.data.username)) {
       return;
     }
 
@@ -477,20 +338,20 @@ io.on('connection', (socket) => {
       return;
     }
 
-    Y.applyUpdate(screen.doc, Uint8Array.from(updateArray));
+    Y.applyUpdate(doc.ydoc, Uint8Array.from(updateArray));
 
     socket.to(roomId).emit('yjs-update', {
       roomId,
-      screenId,
+      docId,
       update: updateArray,
     });
   });
 
   socket.on('awareness-update', (payload) => {
     const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
-    const screenId = String(payload?.screenId || '').trim();
+    const docId = String(payload?.docId || '').trim();
 
-    if (!roomId || !rooms.has(roomId) || !screenId) {
+    if (!roomId || !rooms.has(roomId) || !docId) {
       return;
     }
 
@@ -504,7 +365,7 @@ io.on('connection', (socket) => {
 
     socket.to(roomId).emit('awareness-update', {
       roomId,
-      screenId,
+      docId,
       update: payload.update,
     });
   });

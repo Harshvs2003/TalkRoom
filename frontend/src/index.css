@@ -19,6 +19,10 @@ body {
   min-height: 100vh;
 }
 
+.doc-editor .ql-toolbar {
+  border: 0;
+}
+
 .doc-editor .ql-container {
   border: 0;
   font-family: 'Plus Jakarta Sans', 'Segoe UI', sans-serif;
@@ -26,15 +30,29 @@ body {
 }
 
 .doc-editor .ql-editor {
-  min-height: 72vh;
-  padding: 44px 52px;
+  min-height: 62vh;
+  padding: 36px 40px;
   line-height: 1.75;
   color: #0f172a;
 }
 
-.doc-editor .ql-editor.ql-blank::before {
-  left: 52px;
-  right: 52px;
+.doc-editor-card .ql-container {
+  border: 0;
+  font-family: 'Plus Jakarta Sans', 'Segoe UI', sans-serif;
+  font-size: 14px;
+}
+
+.doc-editor-card .ql-editor {
+  min-height: 180px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 12px 14px;
+  line-height: 1.6;
+  color: #0f172a;
+}
+
+.doc-editor .ql-editor.ql-blank::before,
+.doc-editor-card .ql-editor.ql-blank::before {
   font-style: normal;
   color: #94a3b8;
 }

@@ -14,9 +14,10 @@ import 'quill/dist/quill.snow.css';
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000';
 const USERNAME_STORAGE_KEY = 'talkroom_username';
 
-type Screen = 'home' | 'created' | 'room';
+type AppScreen = 'home' | 'created' | 'room';
 type CreateMode = 'auto' | 'custom';
-type RoomMode = 'single_shared' | 'one_each';
+type ViewMode = 'single_shared' | 'one_each' | 'both';
+type DocType = 'shared' | 'personal';
 
 type CreateRoomAck = {
   ok: boolean;
@@ -25,17 +26,17 @@ type CreateRoomAck = {
   error?: string;
 };
 
-type ScreenInfo = {
+type DocInfo = {
   id: string;
   name: string;
-  type: 'shared' | 'personal';
+  type: DocType;
   ownerUsername: string | null;
 };
 
 type RoomState = {
   hostUsername: string;
-  mode: RoomMode;
-  screens: ScreenInfo[];
+  viewMode: ViewMode;
+  docs: DocInfo[];
 };
 
 type JoinRoomAck = {
@@ -43,28 +44,27 @@ type JoinRoomAck = {
   roomId?: string;
   users?: string[];
   roomState?: RoomState;
-  defaultScreenId?: string | null;
-  initialYDoc?: number[];
+  docSnapshots?: Array<{ docId: string; update: number[] }>;
   error?: string;
 };
 
-type OpenScreenAck = {
-  ok: boolean;
-  screen?: ScreenInfo;
-  initialYDoc?: number[];
-  error?: string;
-};
-
-type RoomBroadcastPayload = {
+type RealtimePayload = {
   roomId: string;
-  screenId: string;
+  docId: string;
   update: number[];
 };
 
-type PendingEditorInit = {
-  roomId: string;
-  screenId: string;
-  initialYDoc: number[];
+type DocModel = {
+  info: DocInfo;
+  ydoc: Y.Doc;
+  awareness: Awareness;
+};
+
+type EditorInstance = {
+  quill: Quill;
+  binding: QuillBinding;
+  onDocUpdate: (update: Uint8Array, origin: unknown) => void;
+  onAwarenessUpdate: (event: { added: number[]; updated: number[]; removed: number[] }) => void;
 };
 
 const ROOM_COLORS = ['#0891b2', '#2563eb', '#7c3aed', '#c2410c', '#059669', '#be123c'];
@@ -85,19 +85,14 @@ if (!(Quill as { imports?: Record<string, unknown> }).imports?.['modules/cursors
 
 function App() {
   const socketRef = useRef<Socket | null>(null);
+  const roomIdRef = useRef('');
   const usernameRef = useRef('');
-  const joinedRoomIdRef = useRef('');
-  const activeScreenIdRef = useRef('');
 
-  const quillContainerRef = useRef<HTMLDivElement | null>(null);
-  const [quillContainerEl, setQuillContainerEl] = useState<HTMLDivElement | null>(null);
+  const docModelsRef = useRef(new Map<string, DocModel>());
+  const editorInstancesRef = useRef(new Map<string, EditorInstance>());
+  const containerMapRef = useRef(new Map<string, HTMLDivElement>());
 
-  const quillRef = useRef<Quill | null>(null);
-  const yDocRef = useRef<Y.Doc | null>(null);
-  const awarenessRef = useRef<Awareness | null>(null);
-  const collabCleanupRef = useRef<(() => void) | null>(null);
-
-  const [screen, setScreen] = useState<Screen>('home');
+  const [appScreen, setAppScreen] = useState<AppScreen>('home');
   const [connected, setConnected] = useState(false);
 
   const [username, setUsername] = useState('');
@@ -107,105 +102,98 @@ function App() {
 
   const [createdRoomId, setCreatedRoomId] = useState('');
   const [joinedRoomId, setJoinedRoomId] = useState('');
-  const [activeScreenId, setActiveScreenId] = useState('');
 
   const [users, setUsers] = useState<string[]>([]);
   const [roomState, setRoomState] = useState<RoomState | null>(null);
-  const [pendingEditorInit, setPendingEditorInit] = useState<PendingEditorInit | null>(null);
 
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    usernameRef.current = username.trim();
-  }, [username]);
-
-  useEffect(() => {
-    joinedRoomIdRef.current = joinedRoomId;
+    roomIdRef.current = joinedRoomId;
   }, [joinedRoomId]);
 
   useEffect(() => {
-    activeScreenIdRef.current = activeScreenId;
-  }, [activeScreenId]);
+    usernameRef.current = username.trim();
+  }, [username]);
 
-  const setQuillContainerNode = useCallback((node: HTMLDivElement | null) => {
-    quillContainerRef.current = node;
-    setQuillContainerEl(node);
-  }, []);
-
-  const getScreenById = useCallback(
-    (screenId: string) => roomState?.screens.find((item) => item.id === screenId) || null,
-    [roomState],
-  );
-
-  const canCurrentUserEditScreen = useCallback(
-    (screenId: string) => {
-      const screenInfo = getScreenById(screenId);
-
-      if (!screenInfo) {
-        return false;
-      }
-
-      if (screenInfo.type === 'shared') {
+  const canEditDoc = useCallback(
+    (doc: DocInfo) => {
+      if (doc.type === 'shared') {
         return true;
       }
 
-      return screenInfo.ownerUsername === username.trim();
+      return doc.ownerUsername === username.trim();
     },
-    [getScreenById, username],
+    [username],
   );
 
-  const destroyCollaboration = useCallback(() => {
-    if (collabCleanupRef.current) {
-      collabCleanupRef.current();
-      collabCleanupRef.current = null;
-    }
+  const destroyAllEditors = useCallback(() => {
+    editorInstancesRef.current.forEach((instance, docId) => {
+      const model = docModelsRef.current.get(docId);
+      if (model) {
+        model.awareness.off('update', instance.onAwarenessUpdate);
+        model.ydoc.off('update', instance.onDocUpdate);
+      }
+
+      instance.binding.destroy();
+    });
+
+    editorInstancesRef.current.clear();
+    containerMapRef.current.forEach((container) => {
+      container.innerHTML = '';
+    });
   }, []);
 
-  const initCollaboration = useCallback(
-    (roomId: string, screenId: string, initialYDoc: number[]) => {
+  const destroyAllDocs = useCallback(() => {
+    destroyAllEditors();
+
+    docModelsRef.current.forEach((model) => {
+      model.awareness.destroy();
+      model.ydoc.destroy();
+    });
+
+    docModelsRef.current.clear();
+  }, [destroyAllEditors]);
+
+  const bindEditorToDoc = useCallback(
+    (docId: string) => {
       const socket = socketRef.current;
-      const container = quillContainerRef.current;
+      const roomId = roomIdRef.current;
+      const model = docModelsRef.current.get(docId);
+      const container = containerMapRef.current.get(docId);
 
-      if (!socket || !container) {
-        return false;
+      if (!socket || !roomId || !model || !container) {
+        return;
       }
 
-      destroyCollaboration();
+      if (editorInstancesRef.current.has(docId)) {
+        return;
+      }
+
       container.innerHTML = '';
-
-      const ydoc = new Y.Doc();
-      if (Array.isArray(initialYDoc) && initialYDoc.length > 0) {
-        Y.applyUpdate(ydoc, Uint8Array.from(initialYDoc), 'remote');
-      }
-
-      const ytext = ydoc.getText('shared-note');
-      const awareness = new Awareness(ydoc);
-
-      awareness.setLocalStateField('user', {
-        name: usernameRef.current || 'Guest',
-        color: getUserColor(usernameRef.current || 'Guest'),
-      });
 
       const quill = new Quill(container, {
         theme: 'snow',
         modules: {
           toolbar: false,
           cursors: {
-            hideDelayMs: 2200,
-            hideSpeedMs: 300,
+            hideDelayMs: 2000,
+            hideSpeedMs: 250,
             transformOnTextChange: true,
           },
           history: {
             userOnly: true,
           },
         },
-        placeholder: 'Start writing your shared document...',
+        placeholder: 'Write here...',
       });
 
-      const binding = new QuillBinding(ytext, quill, awareness);
-      quill.enable(canCurrentUserEditScreen(screenId));
+      quill.enable(canEditDoc(model.info));
+
+      const ytext = model.ydoc.getText('content');
+      const binding = new QuillBinding(ytext, quill, model.awareness);
 
       const onDocUpdate = (update: Uint8Array, origin: unknown) => {
         if (origin === 'remote') {
@@ -214,7 +202,7 @@ function App() {
 
         socket.emit('yjs-update', {
           roomId,
-          screenId,
+          docId,
           update: Array.from(update),
         });
       };
@@ -226,65 +214,108 @@ function App() {
           return;
         }
 
-        const update = encodeAwarenessUpdate(awareness, changedClients);
+        const update = encodeAwarenessUpdate(model.awareness, changedClients);
+
         socket.emit('awareness-update', {
           roomId,
-          screenId,
+          docId,
           update: Array.from(update),
         });
       };
 
-      ydoc.on('update', onDocUpdate);
-      awareness.on('update', onAwarenessUpdate);
+      model.ydoc.on('update', onDocUpdate);
+      model.awareness.on('update', onAwarenessUpdate);
 
-      quillRef.current = quill;
-      yDocRef.current = ydoc;
-      awarenessRef.current = awareness;
-
-      collabCleanupRef.current = () => {
-        awareness.off('update', onAwarenessUpdate);
-        ydoc.off('update', onDocUpdate);
-        binding.destroy();
-        awareness.destroy();
-        ydoc.destroy();
-        container.innerHTML = '';
-
-        quillRef.current = null;
-        yDocRef.current = null;
-        awarenessRef.current = null;
-      };
-
-      return true;
+      editorInstancesRef.current.set(docId, {
+        quill,
+        binding,
+        onDocUpdate,
+        onAwarenessUpdate,
+      });
     },
-    [canCurrentUserEditScreen, destroyCollaboration],
+    [canEditDoc],
   );
 
-  useEffect(() => {
-    if (screen !== 'room' || !pendingEditorInit || !quillContainerEl) {
-      return;
-    }
+  const ensureDocModels = useCallback((nextRoomState: RoomState, snapshots?: Array<{ docId: string; update: number[] }>) => {
+    const snapshotMap = new Map((snapshots || []).map((item) => [item.docId, item.update]));
+    const existingDocIds = new Set(docModelsRef.current.keys());
 
-    const ready = initCollaboration(
-      pendingEditorInit.roomId,
-      pendingEditorInit.screenId,
-      pendingEditorInit.initialYDoc,
-    );
+    nextRoomState.docs.forEach((docInfo) => {
+      const existing = docModelsRef.current.get(docInfo.id);
 
-    if (ready) {
-      setPendingEditorInit(null);
-      setErrorMessage('');
-    }
-  }, [initCollaboration, pendingEditorInit, quillContainerEl, screen]);
+      if (existing) {
+        existing.info = docInfo;
+        existingDocIds.delete(docInfo.id);
+        return;
+      }
 
-  useEffect(() => {
-    const quill = quillRef.current;
+      const ydoc = new Y.Doc();
+      const snapshot = snapshotMap.get(docInfo.id);
 
-    if (!quill || !activeScreenId) {
-      return;
-    }
+      if (Array.isArray(snapshot) && snapshot.length > 0) {
+        Y.applyUpdate(ydoc, Uint8Array.from(snapshot), 'remote');
+      }
 
-    quill.enable(canCurrentUserEditScreen(activeScreenId));
-  }, [activeScreenId, canCurrentUserEditScreen, roomState]);
+      const awareness = new Awareness(ydoc);
+      awareness.setLocalStateField('user', {
+        name: usernameRef.current || 'Guest',
+        color: getUserColor(usernameRef.current || 'Guest'),
+      });
+
+      docModelsRef.current.set(docInfo.id, {
+        info: docInfo,
+        ydoc,
+        awareness,
+      });
+    });
+
+    existingDocIds.forEach((docId) => {
+      const instance = editorInstancesRef.current.get(docId);
+      const model = docModelsRef.current.get(docId);
+
+      if (instance && model) {
+        model.awareness.off('update', instance.onAwarenessUpdate);
+        model.ydoc.off('update', instance.onDocUpdate);
+        instance.binding.destroy();
+        editorInstancesRef.current.delete(docId);
+      }
+
+      if (model) {
+        model.awareness.destroy();
+        model.ydoc.destroy();
+      }
+
+      docModelsRef.current.delete(docId);
+      const container = containerMapRef.current.get(docId);
+      if (container) {
+        container.innerHTML = '';
+      }
+      containerMapRef.current.delete(docId);
+    });
+  }, []);
+
+  const setDocContainer = useCallback(
+    (docId: string, node: HTMLDivElement | null) => {
+      if (!node) {
+        const instance = editorInstancesRef.current.get(docId);
+        const model = docModelsRef.current.get(docId);
+
+        if (instance && model) {
+          model.awareness.off('update', instance.onAwarenessUpdate);
+          model.ydoc.off('update', instance.onDocUpdate);
+          instance.binding.destroy();
+          editorInstancesRef.current.delete(docId);
+        }
+
+        containerMapRef.current.delete(docId);
+        return;
+      }
+
+      containerMapRef.current.set(docId, node);
+      bindEditorToDoc(docId);
+    },
+    [bindEditorToDoc],
+  );
 
   useEffect(() => {
     const storedName = localStorage.getItem(USERNAME_STORAGE_KEY);
@@ -312,43 +343,35 @@ function App() {
     };
 
     const handleRoomState = (nextRoomState: RoomState) => {
+      ensureDocModels(nextRoomState);
       setRoomState(nextRoomState);
+      nextRoomState.docs.forEach((doc) => bindEditorToDoc(doc.id));
     };
 
-    const handleYjsUpdate = (payload: RoomBroadcastPayload) => {
-      if (!payload?.roomId || payload.roomId !== joinedRoomIdRef.current) {
+    const handleYjsUpdate = (payload: RealtimePayload) => {
+      if (!payload?.roomId || payload.roomId !== roomIdRef.current) {
         return;
       }
 
-      if (!payload?.screenId || payload.screenId !== activeScreenIdRef.current) {
+      const model = docModelsRef.current.get(payload.docId);
+      if (!model || !Array.isArray(payload.update)) {
         return;
       }
 
-      if (!Array.isArray(payload.update) || !yDocRef.current) {
-        return;
-      }
-
-      Y.applyUpdate(yDocRef.current, Uint8Array.from(payload.update), 'remote');
+      Y.applyUpdate(model.ydoc, Uint8Array.from(payload.update), 'remote');
     };
 
-    const handleAwarenessUpdate = (payload: RoomBroadcastPayload) => {
-      if (!payload?.roomId || payload.roomId !== joinedRoomIdRef.current) {
+    const handleAwarenessUpdate = (payload: RealtimePayload) => {
+      if (!payload?.roomId || payload.roomId !== roomIdRef.current) {
         return;
       }
 
-      if (!payload?.screenId || payload.screenId !== activeScreenIdRef.current) {
+      const model = docModelsRef.current.get(payload.docId);
+      if (!model || !Array.isArray(payload.update)) {
         return;
       }
 
-      if (!Array.isArray(payload.update) || !awarenessRef.current) {
-        return;
-      }
-
-      applyAwarenessUpdate(
-        awarenessRef.current,
-        Uint8Array.from(payload.update),
-        'remote',
-      );
+      applyAwarenessUpdate(model.awareness, Uint8Array.from(payload.update), 'remote');
     };
 
     socket.on('connect', handleConnect);
@@ -367,20 +390,27 @@ function App() {
       socket.off('yjs-update', handleYjsUpdate);
       socket.off('awareness-update', handleAwarenessUpdate);
       socket.disconnect();
-      destroyCollaboration();
+      destroyAllDocs();
     };
-  }, [destroyCollaboration]);
+  }, [bindEditorToDoc, destroyAllDocs, ensureDocModels]);
 
   useEffect(() => {
-    if (!awarenessRef.current || !username.trim()) {
-      return;
-    }
-
-    awarenessRef.current.setLocalStateField('user', {
-      name: username.trim(),
-      color: getUserColor(username.trim()),
+    docModelsRef.current.forEach((model) => {
+      model.awareness.setLocalStateField('user', {
+        name: username.trim() || 'Guest',
+        color: getUserColor(username.trim() || 'Guest'),
+      });
     });
-  }, [username]);
+
+    editorInstancesRef.current.forEach((instance, docId) => {
+      const model = docModelsRef.current.get(docId);
+      if (!model) {
+        return;
+      }
+
+      instance.quill.enable(canEditDoc(model.info));
+    });
+  }, [canEditDoc, username]);
 
   const normalizedCreateRoomCode = useMemo(
     () => createRoomInput.trim().toUpperCase(),
@@ -397,15 +427,18 @@ function App() {
     [roomState, username],
   );
 
-  const activeScreen = useMemo(
-    () => getScreenById(activeScreenId),
-    [activeScreenId, getScreenById],
+  const sharedDoc = useMemo(
+    () => roomState?.docs.find((doc) => doc.type === 'shared') || null,
+    [roomState],
   );
 
-  const canEditActiveScreen = useMemo(
-    () => (activeScreen ? canCurrentUserEditScreen(activeScreen.id) : false),
-    [activeScreen, canCurrentUserEditScreen],
+  const personalDocs = useMemo(
+    () => (roomState?.docs || []).filter((doc) => doc.type === 'personal'),
+    [roomState],
   );
+
+  const showSharedPane = roomState?.viewMode === 'single_shared' || roomState?.viewMode === 'both';
+  const showPersonalGrid = roomState?.viewMode === 'one_each' || roomState?.viewMode === 'both';
 
   const validateUsername = useCallback(() => {
     if (!username.trim()) {
@@ -460,27 +493,20 @@ function App() {
             return;
           }
 
+          destroyAllDocs();
+          ensureDocModels(ack.roomState, ack.docSnapshots);
+          setRoomState(ack.roomState);
           setJoinedRoomId(ack.roomId);
           setJoinRoomInput(ack.roomId);
           setUsers(Array.isArray(ack.users) ? ack.users : []);
-          setRoomState(ack.roomState);
-          setScreen('room');
+          setAppScreen('room');
           setStatusMessage('Joined room successfully');
 
-          const nextScreenId = ack.defaultScreenId || ack.roomState.screens[0]?.id || '';
-          setActiveScreenId(nextScreenId);
-
-          if (nextScreenId) {
-            setPendingEditorInit({
-              roomId: ack.roomId,
-              screenId: nextScreenId,
-              initialYDoc: ack.initialYDoc || [],
-            });
-          }
+          ack.roomState.docs.forEach((doc) => bindEditorToDoc(doc.id));
         },
       );
     },
-    [connected, username, validateRoomCode, validateUsername],
+    [bindEditorToDoc, connected, destroyAllDocs, ensureDocModels, username, validateRoomCode, validateUsername],
   );
 
   const handleCreateRoom = useCallback(() => {
@@ -523,7 +549,7 @@ function App() {
         setCreatedRoomId(ack.roomId);
         setJoinRoomInput(ack.roomId);
         setStatusMessage(ack.message || 'Room Created');
-        setScreen('created');
+        setAppScreen('created');
       },
     );
   }, [connected, createMode, normalizedCreateRoomCode, username, validateRoomCode, validateUsername]);
@@ -548,97 +574,50 @@ function App() {
     }
   }, [createdRoomId, joinedRoomId, normalizedJoinRoomCode]);
 
-  const handleOpenScreen = useCallback(
-    (screenId: string) => {
-      const socket = socketRef.current;
-
-      if (!socket || !joinedRoomId) {
-        return;
-      }
-
-      if (screenId === activeScreenId) {
-        return;
-      }
-
-      socket.emit('open-screen', { roomId: joinedRoomId, screenId }, (ack: OpenScreenAck) => {
-        if (!ack?.ok || !ack.screen) {
-          setErrorMessage(ack?.error || 'Could not open screen');
-          return;
-        }
-
-        setActiveScreenId(ack.screen.id);
-        setPendingEditorInit({
-          roomId: joinedRoomId,
-          screenId: ack.screen.id,
-          initialYDoc: ack.initialYDoc || [],
-        });
-      });
-    },
-    [activeScreenId, joinedRoomId],
-  );
-
-  const handleModeChange = useCallback(
-    (mode: RoomMode) => {
+  const handleViewModeChange = useCallback(
+    (viewMode: ViewMode) => {
       const socket = socketRef.current;
 
       if (!socket || !joinedRoomId || !isHost) {
         return;
       }
 
-      socket.emit('set-room-mode', { roomId: joinedRoomId, mode }, (ack: { ok: boolean; roomState?: RoomState; error?: string }) => {
+      socket.emit('set-view-mode', { roomId: joinedRoomId, viewMode }, (ack: { ok: boolean; roomState?: RoomState; error?: string }) => {
         if (!ack?.ok || !ack.roomState) {
           setErrorMessage(ack?.error || 'Could not update mode');
           return;
         }
 
+        ensureDocModels(ack.roomState);
         setRoomState(ack.roomState);
-        setStatusMessage(`Mode updated to ${mode === 'one_each' ? 'One Screen Each' : 'Single Shared'}`);
+        ack.roomState.docs.forEach((doc) => bindEditorToDoc(doc.id));
+        setStatusMessage(`Mode switched to ${viewMode.replace(/_/g, ' ')}`);
       });
     },
-    [isHost, joinedRoomId],
+    [bindEditorToDoc, ensureDocModels, isHost, joinedRoomId],
   );
-
-  const handleAddSharedScreen = useCallback(() => {
-    const socket = socketRef.current;
-
-    if (!socket || !joinedRoomId || !isHost) {
-      return;
-    }
-
-    socket.emit('add-shared-screen', { roomId: joinedRoomId }, (ack: { ok: boolean; screen?: ScreenInfo; error?: string }) => {
-      if (!ack?.ok || !ack.screen) {
-        setErrorMessage(ack?.error || 'Could not add shared screen');
-        return;
-      }
-
-      setStatusMessage(`Added ${ack.screen.name}`);
-      handleOpenScreen(ack.screen.id);
-    });
-  }, [handleOpenScreen, isHost, joinedRoomId]);
 
   const goHome = useCallback(() => {
     socketRef.current?.emit('leave-room');
-    destroyCollaboration();
+    destroyAllDocs();
 
-    setScreen('home');
+    setAppScreen('home');
     setJoinedRoomId('');
-    setActiveScreenId('');
     setUsers([]);
     setRoomState(null);
-    setPendingEditorInit(null);
     setStatusMessage('');
     setErrorMessage('');
-  }, [destroyCollaboration]);
+  }, [destroyAllDocs]);
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_0%_0%,_#d1fae5,_#ecfeff_44%,_#f8fafc_100%)] px-4 py-8 font-sans text-slate-800 md:py-12">
-      <section className="mx-auto w-full max-w-6xl rounded-3xl border border-slate-200 bg-white p-6 shadow-panel md:p-8">
+      <section className="mx-auto w-full max-w-7xl rounded-3xl border border-slate-200 bg-white p-6 shadow-panel md:p-8">
         <header className="mb-6 border-b border-slate-100 pb-4">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-600">TalkRoom</p>
           <h1 className="text-2xl font-bold text-slate-900">Collaborative Document</h1>
         </header>
 
-        {screen === 'home' ? (
+        {appScreen === 'home' ? (
           <div className="mx-auto flex max-w-xl flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
             <h2 className="text-xl font-semibold text-slate-900">Home</h2>
 
@@ -708,7 +687,7 @@ function App() {
           </div>
         ) : null}
 
-        {screen === 'created' ? (
+        {appScreen === 'created' ? (
           <div className="mx-auto flex max-w-xl flex-col gap-5 rounded-2xl border border-emerald-200 bg-emerald-50/40 p-5 shadow-sm md:p-6">
             <h2 className="text-xl font-semibold text-emerald-800">Room Created Successfully</h2>
             <p className="text-sm text-slate-600">Share this room code, then click Join Room to enter.</p>
@@ -741,7 +720,7 @@ function App() {
           </div>
         ) : null}
 
-        {screen === 'room' ? (
+        {appScreen === 'room' ? (
           <div className="grid gap-4 lg:grid-cols-[290px_1fr]">
             <aside className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div className="mb-3">
@@ -768,48 +747,18 @@ function App() {
               {isHost ? (
                 <div className="mb-4 rounded-xl border border-slate-200 bg-white p-3">
                   <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Host Controls</p>
-                  <label className="mb-2 block text-xs font-medium text-slate-600">Editing Mode</label>
+                  <label className="mb-2 block text-xs font-medium text-slate-600">View Mode</label>
                   <select
-                    value={roomState?.mode || 'single_shared'}
-                    onChange={(event) => handleModeChange(event.target.value as RoomMode)}
-                    className="mb-2 h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm"
+                    value={roomState?.viewMode || 'single_shared'}
+                    onChange={(event) => handleViewModeChange(event.target.value as ViewMode)}
+                    className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm"
                   >
                     <option value="single_shared">Single Shared Screen</option>
                     <option value="one_each">One Screen Each</option>
+                    <option value="both">Both</option>
                   </select>
-                  <button
-                    type="button"
-                    onClick={handleAddSharedScreen}
-                    className="h-10 w-full rounded-lg bg-brand-500 text-sm font-semibold text-white hover:bg-brand-600"
-                  >
-                    Add Shared Screen
-                  </button>
                 </div>
               ) : null}
-
-              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-500">Screens</h3>
-              <ul className="mb-4 space-y-2 text-sm">
-                {(roomState?.screens || []).map((screenItem) => {
-                  const isActive = activeScreenId === screenItem.id;
-                  const isEditable = screenItem.type === 'shared' || screenItem.ownerUsername === username.trim();
-
-                  return (
-                    <li key={screenItem.id}>
-                      <button
-                        type="button"
-                        onClick={() => handleOpenScreen(screenItem.id)}
-                        className={isActive ? 'w-full rounded-lg border border-brand-500 bg-brand-50 px-2 py-2 text-left' : 'w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-left'}
-                      >
-                        <p className="font-semibold text-slate-700">{screenItem.name}</p>
-                        <p className="text-xs text-slate-500">
-                          {screenItem.type === 'shared' ? 'Shared' : `Personal: ${screenItem.ownerUsername}`}
-                        </p>
-                        <p className="text-xs text-slate-500">{isEditable ? 'Editable' : 'Read only'}</p>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
 
               <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-500">Active Users</h3>
               <ul className="space-y-2 text-sm">
@@ -830,22 +779,46 @@ function App() {
               </button>
             </aside>
 
-            <div className="rounded-2xl border border-slate-200 bg-slate-100 p-4">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-slate-700">
-                  {activeScreen?.name || 'No screen selected'}
-                </p>
-                <span className={canEditActiveScreen ? 'rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700' : 'rounded-full bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-600'}>
-                  {canEditActiveScreen ? 'You can edit' : 'Read only'}
-                </span>
-              </div>
+            <div className="space-y-4">
+              {showSharedPane && sharedDoc ? (
+                <section className="rounded-2xl border border-slate-200 bg-slate-100 p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-sm font-semibold text-slate-700">{sharedDoc.name}</p>
+                    <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700">Editable by all</span>
+                  </div>
+                  <div className="doc-editor mx-auto max-w-4xl rounded-xl bg-white shadow-sm">
+                    <div ref={(node) => setDocContainer(sharedDoc.id, node)} className="doc-editor-surface" />
+                  </div>
+                </section>
+              ) : null}
 
-              <div className="doc-editor mx-auto max-w-3xl rounded-xl bg-white shadow-sm">
-                <div ref={setQuillContainerNode} className="doc-editor-surface" />
-              </div>
-              <p className="mt-2 text-sm text-slate-500">
-                Shared screens are editable by all. Personal screens are editable only by the owner and visible to everyone.
-              </p>
+              {showPersonalGrid ? (
+                <section className="rounded-2xl border border-slate-200 bg-slate-100 p-4">
+                  <div className="mb-3">
+                    <p className="text-sm font-semibold text-slate-700">Personal Cards</p>
+                    <p className="text-xs text-slate-500">Everyone can view all cards. Only owner can edit their card.</p>
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {personalDocs.map((doc) => {
+                      const editable = canEditDoc(doc);
+
+                      return (
+                        <article key={doc.id} className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <p className="text-sm font-semibold text-slate-700">{doc.name}</p>
+                            <span className={editable ? 'rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-700' : 'rounded-full bg-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-600'}>
+                              {editable ? 'You can edit' : 'Read only'}
+                            </span>
+                          </div>
+                          <div className="doc-editor-card rounded-lg border border-slate-200">
+                            <div ref={(node) => setDocContainer(doc.id, node)} className="doc-editor-surface" />
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
             </div>
           </div>
         ) : null}
