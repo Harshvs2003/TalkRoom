@@ -1,16 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
-import { basicSetup } from 'codemirror';
-import { EditorState } from '@codemirror/state';
-import { EditorView } from '@codemirror/view';
-import { markdown } from '@codemirror/lang-markdown';
-import { yCollab } from 'y-codemirror.next';
 import * as Y from 'yjs';
-import {
-  Awareness,
-  applyAwarenessUpdate,
-  encodeAwarenessUpdate,
-} from 'y-protocols/awareness';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000';
 const USERNAME_STORAGE_KEY = 'talkroom_username';
@@ -38,33 +28,53 @@ type RoomBroadcastPayload = {
   update: number[];
 };
 
-type PendingEditorInit = {
-  roomId: string;
-  initialYDoc: number[];
-};
-
-const ROOM_COLORS = ['#0891b2', '#2563eb', '#7c3aed', '#c2410c', '#059669', '#be123c'];
-
-const getUserColor = (username: string) => {
-  let hash = 0;
-  for (let i = 0; i < username.length; i += 1) {
-    hash = (hash << 5) - hash + username.charCodeAt(i);
-    hash |= 0;
+const applyTextDiff = (ytext: Y.Text, previousText: string, nextText: string) => {
+  if (previousText === nextText) {
+    return;
   }
 
-  return ROOM_COLORS[Math.abs(hash) % ROOM_COLORS.length];
+  let start = 0;
+  while (
+    start < previousText.length &&
+    start < nextText.length &&
+    previousText[start] === nextText[start]
+  ) {
+    start += 1;
+  }
+
+  let previousEnd = previousText.length - 1;
+  let nextEnd = nextText.length - 1;
+
+  while (
+    previousEnd >= start &&
+    nextEnd >= start &&
+    previousText[previousEnd] === nextText[nextEnd]
+  ) {
+    previousEnd -= 1;
+    nextEnd -= 1;
+  }
+
+  const deleteLength = previousEnd - start + 1;
+  const insertText = nextText.slice(start, nextEnd + 1);
+
+  if (deleteLength > 0) {
+    ytext.delete(start, deleteLength);
+  }
+
+  if (insertText.length > 0) {
+    ytext.insert(start, insertText);
+  }
 };
 
 function App() {
   const socketRef = useRef<Socket | null>(null);
-  const usernameRef = useRef('');
   const joinedRoomIdRef = useRef('');
 
-  const editorContainerRef = useRef<HTMLDivElement | null>(null);
-  const editorViewRef = useRef<EditorView | null>(null);
   const yDocRef = useRef<Y.Doc | null>(null);
-  const awarenessRef = useRef<Awareness | null>(null);
+  const yTextRef = useRef<Y.Text | null>(null);
   const collabCleanupRef = useRef<(() => void) | null>(null);
+
+  const editorTextRef = useRef('');
 
   const [screen, setScreen] = useState<Screen>('home');
   const [connected, setConnected] = useState(false);
@@ -78,19 +88,19 @@ function App() {
   const [joinedRoomId, setJoinedRoomId] = useState('');
 
   const [users, setUsers] = useState<string[]>([]);
-  const [pendingEditorInit, setPendingEditorInit] = useState<PendingEditorInit | null>(null);
+  const [editorText, setEditorText] = useState('');
 
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    usernameRef.current = username.trim();
-  }, [username]);
-
-  useEffect(() => {
     joinedRoomIdRef.current = joinedRoomId;
   }, [joinedRoomId]);
+
+  useEffect(() => {
+    editorTextRef.current = editorText;
+  }, [editorText]);
 
   const destroyCollaboration = useCallback(() => {
     if (collabCleanupRef.current) {
@@ -99,12 +109,12 @@ function App() {
     }
   }, []);
 
-  const initCollaborationEditor = useCallback(
+  const initCollaboration = useCallback(
     (roomId: string, initialYDoc: number[]) => {
       const socket = socketRef.current;
 
-      if (!socket || !editorContainerRef.current) {
-        setErrorMessage('Editor is not ready yet.');
+      if (!socket) {
+        setErrorMessage('Socket is not ready yet.');
         return;
       }
 
@@ -115,32 +125,7 @@ function App() {
         Y.applyUpdate(ydoc, Uint8Array.from(initialYDoc), 'remote');
       }
 
-      const awareness = new Awareness(ydoc);
-      awareness.setLocalStateField('user', {
-        name: usernameRef.current,
-        color: getUserColor(usernameRef.current || 'Guest'),
-      });
-
       const ytext = ydoc.getText('shared-note');
-      const undoManager = new Y.UndoManager(ytext);
-
-      const state = EditorState.create({
-        extensions: [
-          basicSetup,
-          markdown(),
-          EditorView.lineWrapping,
-          yCollab(ytext, awareness, { undoManager }),
-          EditorView.theme({
-            '&': { height: '56vh', minHeight: '320px' },
-            '.cm-scroller': { overflow: 'auto' },
-          }),
-        ],
-      });
-
-      const view = new EditorView({
-        state,
-        parent: editorContainerRef.current,
-      });
 
       const onDocUpdate = (update: Uint8Array, origin: unknown) => {
         if (origin === 'remote') {
@@ -153,50 +138,32 @@ function App() {
         });
       };
 
-      const onAwarenessUpdate = ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
-        const changedClients = [...added, ...updated, ...removed];
-
-        if (changedClients.length === 0) {
-          return;
-        }
-
-        const update = encodeAwarenessUpdate(awareness, changedClients);
-        socket.emit('awareness-update', {
-          roomId,
-          update: Array.from(update),
-        });
+      const onTextChange = () => {
+        const nextText = ytext.toString();
+        editorTextRef.current = nextText;
+        setEditorText(nextText);
       };
 
       ydoc.on('update', onDocUpdate);
-      awareness.on('update', onAwarenessUpdate);
+      ytext.observe(onTextChange);
 
-      editorViewRef.current = view;
+      const initialText = ytext.toString();
+      editorTextRef.current = initialText;
+      setEditorText(initialText);
+
       yDocRef.current = ydoc;
-      awarenessRef.current = awareness;
+      yTextRef.current = ytext;
 
       collabCleanupRef.current = () => {
-        awareness.off('update', onAwarenessUpdate);
+        ytext.unobserve(onTextChange);
         ydoc.off('update', onDocUpdate);
-        awareness.destroy();
-        view.destroy();
         ydoc.destroy();
-
-        editorViewRef.current = null;
         yDocRef.current = null;
-        awarenessRef.current = null;
+        yTextRef.current = null;
       };
     },
     [destroyCollaboration],
   );
-
-  useEffect(() => {
-    if (screen !== 'room' || !pendingEditorInit || !editorContainerRef.current) {
-      return;
-    }
-
-    initCollaborationEditor(pendingEditorInit.roomId, pendingEditorInit.initialYDoc);
-    setPendingEditorInit(null);
-  }, [initCollaborationEditor, pendingEditorInit, screen]);
 
   useEffect(() => {
     const storedName = localStorage.getItem(USERNAME_STORAGE_KEY);
@@ -235,27 +202,10 @@ function App() {
       Y.applyUpdate(yDocRef.current, Uint8Array.from(payload.update), 'remote');
     };
 
-    const handleAwarenessUpdate = (payload: RoomBroadcastPayload) => {
-      if (!payload?.roomId || payload.roomId !== joinedRoomIdRef.current) {
-        return;
-      }
-
-      if (!Array.isArray(payload.update) || !awarenessRef.current) {
-        return;
-      }
-
-      applyAwarenessUpdate(
-        awarenessRef.current,
-        Uint8Array.from(payload.update),
-        'remote',
-      );
-    };
-
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('users-update', handleUsersUpdate);
     socket.on('yjs-update', handleYjsUpdate);
-    socket.on('awareness-update', handleAwarenessUpdate);
 
     return () => {
       socket.emit('leave-room');
@@ -263,22 +213,10 @@ function App() {
       socket.off('disconnect', handleDisconnect);
       socket.off('users-update', handleUsersUpdate);
       socket.off('yjs-update', handleYjsUpdate);
-      socket.off('awareness-update', handleAwarenessUpdate);
       socket.disconnect();
       destroyCollaboration();
     };
   }, [destroyCollaboration]);
-
-  useEffect(() => {
-    if (!awarenessRef.current || !username.trim()) {
-      return;
-    }
-
-    awarenessRef.current.setLocalStateField('user', {
-      name: username.trim(),
-      color: getUserColor(username.trim()),
-    });
-  }, [username]);
 
   const normalizedCreateRoomCode = useMemo(
     () => createRoomInput.trim().toUpperCase(),
@@ -348,14 +286,12 @@ function App() {
           setUsers(Array.isArray(ack.users) ? ack.users : []);
           setScreen('room');
           setStatusMessage('Joined room successfully');
-          setPendingEditorInit({
-            roomId: ack.roomId || normalized,
-            initialYDoc: ack.initialYDoc || [],
-          });
+
+          initCollaboration(ack.roomId || normalized, ack.initialYDoc || []);
         },
       );
     },
-    [connected, username, validateRoomCode, validateUsername],
+    [connected, initCollaboration, username, validateRoomCode, validateUsername],
   );
 
   const handleCreateRoom = useCallback(() => {
@@ -416,6 +352,25 @@ function App() {
     }
   }, [createdRoomId, joinedRoomId, normalizedJoinRoomCode]);
 
+  const handleEditorChange = useCallback((nextText: string) => {
+    setEditorText(nextText);
+
+    const ytext = yTextRef.current;
+    const ydoc = yDocRef.current;
+
+    if (!ytext || !ydoc) {
+      return;
+    }
+
+    const previousText = editorTextRef.current;
+
+    ydoc.transact(() => {
+      applyTextDiff(ytext, previousText, nextText);
+    }, 'local');
+
+    editorTextRef.current = nextText;
+  }, []);
+
   const goHome = useCallback(() => {
     socketRef.current?.emit('leave-room');
     destroyCollaboration();
@@ -423,7 +378,8 @@ function App() {
     setScreen('home');
     setJoinedRoomId('');
     setUsers([]);
-    setPendingEditorInit(null);
+    setEditorText('');
+    editorTextRef.current = '';
     setStatusMessage('');
     setErrorMessage('');
   }, [destroyCollaboration]);
@@ -580,12 +536,14 @@ function App() {
             </aside>
 
             <div className="rounded-2xl border border-slate-200 bg-white p-4">
-              <div
-                ref={editorContainerRef}
-                className="rounded-xl border border-slate-200"
+              <textarea
+                value={editorText}
+                onChange={(event) => handleEditorChange(event.target.value)}
+                placeholder="Start writing your document..."
+                className="h-[56vh] min-h-[320px] w-full resize-none rounded-xl border border-slate-200 bg-white p-4 text-base leading-7 text-slate-800 outline-none ring-brand-500 transition focus:ring-2"
               />
               <p className="mt-2 text-sm text-slate-500">
-                Concurrent edits are merged automatically using CRDT sync.
+                Real-time collaborative document editing with conflict-free sync.
               </p>
             </div>
           </div>
