@@ -8,6 +8,7 @@ require('dotenv').config();
 const PORT = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const ROOM_ID_LENGTH = 6;
+const SCREEN_ID_LENGTH = 8;
 
 const app = express();
 const server = http.createServer(app);
@@ -33,36 +34,60 @@ const io = new Server(server, {
   },
 });
 
-// In-memory room store:
 // rooms = {
 //   roomId: {
 //     users: [{ socketId, username }],
-//     doc: Y.Doc
+//     hostUsername: string,
+//     mode: 'single_shared' | 'one_each',
+//     screens: [{ id, name, type, ownerUsername, doc: Y.Doc }]
 //   }
 // }
 const rooms = new Map();
 
-const generateRoomId = () => {
+const generateCode = (length) => {
   const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
-  return Array.from({ length: ROOM_ID_LENGTH }, () => {
+  return Array.from({ length }, () => {
     const randomIndex = Math.floor(Math.random() * characters.length);
     return characters[randomIndex];
   }).join('');
 };
 
 const createUniqueRoomId = () => {
-  let roomId = generateRoomId();
+  let roomId = generateCode(ROOM_ID_LENGTH);
 
   while (rooms.has(roomId)) {
-    roomId = generateRoomId();
+    roomId = generateCode(ROOM_ID_LENGTH);
   }
 
   return roomId;
 };
 
+const createScreenId = (room) => {
+  let screenId = generateCode(SCREEN_ID_LENGTH);
+
+  while (room.screens.some((screen) => screen.id === screenId)) {
+    screenId = generateCode(SCREEN_ID_LENGTH);
+  }
+
+  return screenId;
+};
+
 const normalizeRoomId = (value) => String(value || '').trim().toUpperCase();
 const normalizeUsername = (value) => String(value || '').trim();
+
+const toPublicScreen = (screen) => ({
+  id: screen.id,
+  name: screen.name,
+  type: screen.type,
+  ownerUsername: screen.ownerUsername || null,
+});
+
+const toPublicRoomState = (room) => ({
+  hostUsername: room.hostUsername,
+  mode: room.mode,
+  screens: room.screens.map(toPublicScreen),
+});
 
 const emitUsersUpdate = (roomId) => {
   const room = rooms.get(roomId);
@@ -71,8 +96,76 @@ const emitUsersUpdate = (roomId) => {
     return;
   }
 
-  const usernames = room.users.map((user) => user.username);
-  io.to(roomId).emit('users-update', usernames);
+  io.to(roomId).emit(
+    'users-update',
+    room.users.map((user) => user.username),
+  );
+};
+
+const emitRoomState = (roomId) => {
+  const room = rooms.get(roomId);
+
+  if (!room) {
+    return;
+  }
+
+  io.to(roomId).emit('room-state', toPublicRoomState(room));
+};
+
+const createScreen = (room, options) => {
+  const screen = {
+    id: createScreenId(room),
+    name: options.name,
+    type: options.type,
+    ownerUsername: options.ownerUsername || null,
+    doc: new Y.Doc(),
+  };
+
+  room.screens.push(screen);
+  return screen;
+};
+
+const ensurePersonalScreen = (room, username) => {
+  const existing = room.screens.find(
+    (screen) => screen.type === 'personal' && screen.ownerUsername === username,
+  );
+
+  if (existing) {
+    return existing;
+  }
+
+  return createScreen(room, {
+    name: `${username}'s Screen`,
+    type: 'personal',
+    ownerUsername: username,
+  });
+};
+
+const canEditScreen = (screen, username) => {
+  if (screen.type === 'shared') {
+    return true;
+  }
+
+  return screen.ownerUsername === username;
+};
+
+const getDefaultScreenForUser = (room, username) => {
+  if (room.mode === 'one_each') {
+    const personal = room.screens.find(
+      (screen) => screen.type === 'personal' && screen.ownerUsername === username,
+    );
+
+    if (personal) {
+      return personal;
+    }
+  }
+
+  const firstShared = room.screens.find((screen) => screen.type === 'shared');
+  if (firstShared) {
+    return firstShared;
+  }
+
+  return room.screens[0] || null;
 };
 
 const leaveCurrentRoom = (socket) => {
@@ -83,10 +176,22 @@ const leaveCurrentRoom = (socket) => {
   }
 
   const room = rooms.get(roomId);
+  const leavingUsername = socket.data.username;
+
   room.users = room.users.filter((user) => user.socketId !== socket.id);
 
   socket.leave(roomId);
-  emitUsersUpdate(roomId);
+
+  if (room.users.length === 0) {
+    rooms.delete(roomId);
+  } else {
+    if (room.hostUsername === leavingUsername) {
+      room.hostUsername = room.users[0].username;
+    }
+
+    emitUsersUpdate(roomId);
+    emitRoomState(roomId);
+  }
 
   socket.data.roomId = null;
   socket.data.username = null;
@@ -95,7 +200,15 @@ const leaveCurrentRoom = (socket) => {
 io.on('connection', (socket) => {
   socket.on('create-room', (payload, ack) => {
     const requestedRoomId = normalizeRoomId(payload?.roomId);
+    const hostUsername = normalizeUsername(payload?.username);
     let roomId = requestedRoomId;
+
+    if (!hostUsername) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Username is required to create a room' });
+      }
+      return;
+    }
 
     if (requestedRoomId) {
       if (!/^[A-Z0-9]{3,12}$/.test(requestedRoomId)) {
@@ -115,10 +228,20 @@ io.on('connection', (socket) => {
       roomId = createUniqueRoomId();
     }
 
-    rooms.set(roomId, {
+    const room = {
       users: [],
-      doc: new Y.Doc(),
+      hostUsername,
+      mode: 'single_shared',
+      screens: [],
+    };
+
+    createScreen(room, {
+      name: 'Shared Screen 1',
+      type: 'shared',
+      ownerUsername: null,
     });
+
+    rooms.set(roomId, room);
 
     if (typeof ack === 'function') {
       ack({ ok: true, roomId, message: 'Room Created' });
@@ -166,36 +289,174 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // If same socket re-joins same room, remove stale entry before adding again.
     room.users = room.users.filter((user) => user.socketId !== socket.id);
+    room.users.push({ socketId: socket.id, username });
 
-    room.users.push({
-      socketId: socket.id,
-      username,
-    });
+    if (room.mode === 'one_each') {
+      ensurePersonalScreen(room, username);
+    }
 
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.username = username;
 
     emitUsersUpdate(roomId);
-    socket.emit('text-update', room.text);
+    emitRoomState(roomId);
+
+    const defaultScreen = getDefaultScreenForUser(room, username);
+    const initialYDoc = defaultScreen
+      ? Array.from(Y.encodeStateAsUpdate(defaultScreen.doc))
+      : [];
 
     if (typeof ack === 'function') {
-      const fullStateUpdate = Y.encodeStateAsUpdate(room.doc);
       ack({
         ok: true,
         roomId,
-        initialYDoc: Array.from(fullStateUpdate),
         users: room.users.map((user) => user.username),
+        roomState: toPublicRoomState(room),
+        defaultScreenId: defaultScreen ? defaultScreen.id : null,
+        initialYDoc,
+      });
+    }
+  });
+
+  socket.on('open-screen', (payload, ack) => {
+    const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
+    const screenId = String(payload?.screenId || '').trim();
+
+    if (!roomId || !rooms.has(roomId) || !screenId) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Invalid screen request' });
+      }
+      return;
+    }
+
+    if (socket.data.roomId !== roomId) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Not a room member' });
+      }
+      return;
+    }
+
+    const room = rooms.get(roomId);
+    const screen = room.screens.find((item) => item.id === screenId);
+
+    if (!screen) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Screen not found' });
+      }
+      return;
+    }
+
+    if (typeof ack === 'function') {
+      ack({
+        ok: true,
+        screen: toPublicScreen(screen),
+        initialYDoc: Array.from(Y.encodeStateAsUpdate(screen.doc)),
+      });
+    }
+  });
+
+  socket.on('set-room-mode', (payload, ack) => {
+    const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
+    const mode = payload?.mode;
+
+    if (!roomId || !rooms.has(roomId)) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Room not found' });
+      }
+      return;
+    }
+
+    if (socket.data.roomId !== roomId) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Not a room member' });
+      }
+      return;
+    }
+
+    const room = rooms.get(roomId);
+
+    if (room.hostUsername !== socket.data.username) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Only host can change mode' });
+      }
+      return;
+    }
+
+    if (mode !== 'single_shared' && mode !== 'one_each') {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Invalid mode' });
+      }
+      return;
+    }
+
+    room.mode = mode;
+
+    if (mode === 'one_each') {
+      room.users.forEach((user) => {
+        ensurePersonalScreen(room, user.username);
+      });
+    }
+
+    emitRoomState(roomId);
+
+    if (typeof ack === 'function') {
+      ack({ ok: true, roomState: toPublicRoomState(room) });
+    }
+  });
+
+  socket.on('add-shared-screen', (payload, ack) => {
+    const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
+
+    if (!roomId || !rooms.has(roomId)) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Room not found' });
+      }
+      return;
+    }
+
+    if (socket.data.roomId !== roomId) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Not a room member' });
+      }
+      return;
+    }
+
+    const room = rooms.get(roomId);
+
+    if (room.hostUsername !== socket.data.username) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Only host can add shared screens' });
+      }
+      return;
+    }
+
+    const sharedCount = room.screens.filter((screen) => screen.type === 'shared').length;
+    const requestedName = String(payload?.name || '').trim();
+    const screenName = requestedName || `Shared Screen ${sharedCount + 1}`;
+
+    const screen = createScreen(room, {
+      name: screenName,
+      type: 'shared',
+      ownerUsername: null,
+    });
+
+    emitRoomState(roomId);
+
+    if (typeof ack === 'function') {
+      ack({
+        ok: true,
+        screen: toPublicScreen(screen),
       });
     }
   });
 
   socket.on('yjs-update', (payload) => {
     const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
+    const screenId = String(payload?.screenId || '').trim();
 
-    if (!roomId || !rooms.has(roomId)) {
+    if (!roomId || !rooms.has(roomId) || !screenId) {
       return;
     }
 
@@ -204,25 +465,32 @@ io.on('connection', (socket) => {
     }
 
     const room = rooms.get(roomId);
+    const screen = room.screens.find((item) => item.id === screenId);
+
+    if (!screen || !canEditScreen(screen, socket.data.username)) {
+      return;
+    }
+
     const updateArray = payload?.update;
 
     if (!Array.isArray(updateArray)) {
       return;
     }
 
-    const update = Uint8Array.from(updateArray);
-    Y.applyUpdate(room.doc, update);
+    Y.applyUpdate(screen.doc, Uint8Array.from(updateArray));
 
     socket.to(roomId).emit('yjs-update', {
       roomId,
+      screenId,
       update: updateArray,
     });
   });
 
   socket.on('awareness-update', (payload) => {
     const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
+    const screenId = String(payload?.screenId || '').trim();
 
-    if (!roomId || !rooms.has(roomId)) {
+    if (!roomId || !rooms.has(roomId) || !screenId) {
       return;
     }
 
@@ -236,29 +504,9 @@ io.on('connection', (socket) => {
 
     socket.to(roomId).emit('awareness-update', {
       roomId,
+      screenId,
       update: payload.update,
     });
-  });
-
-  socket.on('typing', (payload) => {
-    const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
-
-    if (!roomId || !rooms.has(roomId)) {
-      return;
-    }
-
-    if (socket.data.roomId !== roomId) {
-      return;
-    }
-
-    const username = normalizeUsername(payload?.username || socket.data.username);
-    const isTyping = Boolean(payload?.isTyping);
-
-    if (!username) {
-      return;
-    }
-
-    socket.to(roomId).emit('typing', { username, isTyping });
   });
 
   socket.on('leave-room', () => {

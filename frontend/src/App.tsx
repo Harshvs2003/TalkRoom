@@ -16,6 +16,7 @@ const USERNAME_STORAGE_KEY = 'talkroom_username';
 
 type Screen = 'home' | 'created' | 'room';
 type CreateMode = 'auto' | 'custom';
+type RoomMode = 'single_shared' | 'one_each';
 
 type CreateRoomAck = {
   ok: boolean;
@@ -24,21 +25,45 @@ type CreateRoomAck = {
   error?: string;
 };
 
+type ScreenInfo = {
+  id: string;
+  name: string;
+  type: 'shared' | 'personal';
+  ownerUsername: string | null;
+};
+
+type RoomState = {
+  hostUsername: string;
+  mode: RoomMode;
+  screens: ScreenInfo[];
+};
+
 type JoinRoomAck = {
   ok: boolean;
   roomId?: string;
-  initialYDoc?: number[];
   users?: string[];
+  roomState?: RoomState;
+  defaultScreenId?: string | null;
+  initialYDoc?: number[];
+  error?: string;
+};
+
+type OpenScreenAck = {
+  ok: boolean;
+  screen?: ScreenInfo;
+  initialYDoc?: number[];
   error?: string;
 };
 
 type RoomBroadcastPayload = {
   roomId: string;
+  screenId: string;
   update: number[];
 };
 
 type PendingEditorInit = {
   roomId: string;
+  screenId: string;
   initialYDoc: number[];
 };
 
@@ -62,10 +87,12 @@ function App() {
   const socketRef = useRef<Socket | null>(null);
   const usernameRef = useRef('');
   const joinedRoomIdRef = useRef('');
+  const activeScreenIdRef = useRef('');
 
   const quillContainerRef = useRef<HTMLDivElement | null>(null);
   const [quillContainerEl, setQuillContainerEl] = useState<HTMLDivElement | null>(null);
 
+  const quillRef = useRef<Quill | null>(null);
   const yDocRef = useRef<Y.Doc | null>(null);
   const awarenessRef = useRef<Awareness | null>(null);
   const collabCleanupRef = useRef<(() => void) | null>(null);
@@ -80,8 +107,10 @@ function App() {
 
   const [createdRoomId, setCreatedRoomId] = useState('');
   const [joinedRoomId, setJoinedRoomId] = useState('');
+  const [activeScreenId, setActiveScreenId] = useState('');
 
   const [users, setUsers] = useState<string[]>([]);
+  const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [pendingEditorInit, setPendingEditorInit] = useState<PendingEditorInit | null>(null);
 
   const [statusMessage, setStatusMessage] = useState('');
@@ -96,6 +125,37 @@ function App() {
     joinedRoomIdRef.current = joinedRoomId;
   }, [joinedRoomId]);
 
+  useEffect(() => {
+    activeScreenIdRef.current = activeScreenId;
+  }, [activeScreenId]);
+
+  const setQuillContainerNode = useCallback((node: HTMLDivElement | null) => {
+    quillContainerRef.current = node;
+    setQuillContainerEl(node);
+  }, []);
+
+  const getScreenById = useCallback(
+    (screenId: string) => roomState?.screens.find((item) => item.id === screenId) || null,
+    [roomState],
+  );
+
+  const canCurrentUserEditScreen = useCallback(
+    (screenId: string) => {
+      const screenInfo = getScreenById(screenId);
+
+      if (!screenInfo) {
+        return false;
+      }
+
+      if (screenInfo.type === 'shared') {
+        return true;
+      }
+
+      return screenInfo.ownerUsername === username.trim();
+    },
+    [getScreenById, username],
+  );
+
   const destroyCollaboration = useCallback(() => {
     if (collabCleanupRef.current) {
       collabCleanupRef.current();
@@ -103,13 +163,8 @@ function App() {
     }
   }, []);
 
-  const setQuillContainerNode = useCallback((node: HTMLDivElement | null) => {
-    quillContainerRef.current = node;
-    setQuillContainerEl(node);
-  }, []);
-
   const initCollaboration = useCallback(
-    (roomId: string, initialYDoc: number[]) => {
+    (roomId: string, screenId: string, initialYDoc: number[]) => {
       const socket = socketRef.current;
       const container = quillContainerRef.current;
 
@@ -150,6 +205,7 @@ function App() {
       });
 
       const binding = new QuillBinding(ytext, quill, awareness);
+      quill.enable(canCurrentUserEditScreen(screenId));
 
       const onDocUpdate = (update: Uint8Array, origin: unknown) => {
         if (origin === 'remote') {
@@ -158,6 +214,7 @@ function App() {
 
         socket.emit('yjs-update', {
           roomId,
+          screenId,
           update: Array.from(update),
         });
       };
@@ -172,6 +229,7 @@ function App() {
         const update = encodeAwarenessUpdate(awareness, changedClients);
         socket.emit('awareness-update', {
           roomId,
+          screenId,
           update: Array.from(update),
         });
       };
@@ -179,6 +237,7 @@ function App() {
       ydoc.on('update', onDocUpdate);
       awareness.on('update', onAwarenessUpdate);
 
+      quillRef.current = quill;
       yDocRef.current = ydoc;
       awarenessRef.current = awareness;
 
@@ -190,13 +249,14 @@ function App() {
         ydoc.destroy();
         container.innerHTML = '';
 
+        quillRef.current = null;
         yDocRef.current = null;
         awarenessRef.current = null;
       };
 
       return true;
     },
-    [destroyCollaboration],
+    [canCurrentUserEditScreen, destroyCollaboration],
   );
 
   useEffect(() => {
@@ -206,6 +266,7 @@ function App() {
 
     const ready = initCollaboration(
       pendingEditorInit.roomId,
+      pendingEditorInit.screenId,
       pendingEditorInit.initialYDoc,
     );
 
@@ -214,6 +275,16 @@ function App() {
       setErrorMessage('');
     }
   }, [initCollaboration, pendingEditorInit, quillContainerEl, screen]);
+
+  useEffect(() => {
+    const quill = quillRef.current;
+
+    if (!quill || !activeScreenId) {
+      return;
+    }
+
+    quill.enable(canCurrentUserEditScreen(activeScreenId));
+  }, [activeScreenId, canCurrentUserEditScreen, roomState]);
 
   useEffect(() => {
     const storedName = localStorage.getItem(USERNAME_STORAGE_KEY);
@@ -240,8 +311,16 @@ function App() {
       setUsers(Array.isArray(nextUsers) ? nextUsers : []);
     };
 
+    const handleRoomState = (nextRoomState: RoomState) => {
+      setRoomState(nextRoomState);
+    };
+
     const handleYjsUpdate = (payload: RoomBroadcastPayload) => {
       if (!payload?.roomId || payload.roomId !== joinedRoomIdRef.current) {
+        return;
+      }
+
+      if (!payload?.screenId || payload.screenId !== activeScreenIdRef.current) {
         return;
       }
 
@@ -254,6 +333,10 @@ function App() {
 
     const handleAwarenessUpdate = (payload: RoomBroadcastPayload) => {
       if (!payload?.roomId || payload.roomId !== joinedRoomIdRef.current) {
+        return;
+      }
+
+      if (!payload?.screenId || payload.screenId !== activeScreenIdRef.current) {
         return;
       }
 
@@ -271,6 +354,7 @@ function App() {
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('users-update', handleUsersUpdate);
+    socket.on('room-state', handleRoomState);
     socket.on('yjs-update', handleYjsUpdate);
     socket.on('awareness-update', handleAwarenessUpdate);
 
@@ -279,6 +363,7 @@ function App() {
       socket.off('connect', handleConnect);
       socket.off('disconnect', handleDisconnect);
       socket.off('users-update', handleUsersUpdate);
+      socket.off('room-state', handleRoomState);
       socket.off('yjs-update', handleYjsUpdate);
       socket.off('awareness-update', handleAwarenessUpdate);
       socket.disconnect();
@@ -305,6 +390,21 @@ function App() {
   const normalizedJoinRoomCode = useMemo(
     () => joinRoomInput.trim().toUpperCase(),
     [joinRoomInput],
+  );
+
+  const isHost = useMemo(
+    () => Boolean(roomState && roomState.hostUsername === username.trim()),
+    [roomState, username],
+  );
+
+  const activeScreen = useMemo(
+    () => getScreenById(activeScreenId),
+    [activeScreenId, getScreenById],
+  );
+
+  const canEditActiveScreen = useMemo(
+    () => (activeScreen ? canCurrentUserEditScreen(activeScreen.id) : false),
+    [activeScreen, canCurrentUserEditScreen],
   );
 
   const validateUsername = useCallback(() => {
@@ -355,7 +455,7 @@ function App() {
           username: cleanUsername,
         },
         (ack: JoinRoomAck) => {
-          if (!ack?.ok || !ack.roomId) {
+          if (!ack?.ok || !ack.roomId || !ack.roomState) {
             setErrorMessage(ack?.error || 'Unable to join room.');
             return;
           }
@@ -363,12 +463,20 @@ function App() {
           setJoinedRoomId(ack.roomId);
           setJoinRoomInput(ack.roomId);
           setUsers(Array.isArray(ack.users) ? ack.users : []);
+          setRoomState(ack.roomState);
           setScreen('room');
           setStatusMessage('Joined room successfully');
-          setPendingEditorInit({
-            roomId: ack.roomId || normalized,
-            initialYDoc: ack.initialYDoc || [],
-          });
+
+          const nextScreenId = ack.defaultScreenId || ack.roomState.screens[0]?.id || '';
+          setActiveScreenId(nextScreenId);
+
+          if (nextScreenId) {
+            setPendingEditorInit({
+              roomId: ack.roomId,
+              screenId: nextScreenId,
+              initialYDoc: ack.initialYDoc || [],
+            });
+          }
         },
       );
     },
@@ -388,6 +496,10 @@ function App() {
       return;
     }
 
+    if (!validateUsername()) {
+      return;
+    }
+
     setErrorMessage('');
     setStatusMessage('');
 
@@ -398,7 +510,10 @@ function App() {
 
     socket.emit(
       'create-room',
-      { roomId: createMode === 'custom' ? normalizedCreateRoomCode : '' },
+      {
+        roomId: createMode === 'custom' ? normalizedCreateRoomCode : '',
+        username: username.trim(),
+      },
       (ack: CreateRoomAck) => {
         if (!ack?.ok || !ack.roomId) {
           setErrorMessage(ack?.error || 'Could not create room.');
@@ -411,7 +526,7 @@ function App() {
         setScreen('created');
       },
     );
-  }, [connected, createMode, normalizedCreateRoomCode, validateRoomCode]);
+  }, [connected, createMode, normalizedCreateRoomCode, username, validateRoomCode, validateUsername]);
 
   const handleJoinCreatedRoom = useCallback(() => {
     joinRoom(createdRoomId);
@@ -433,13 +548,83 @@ function App() {
     }
   }, [createdRoomId, joinedRoomId, normalizedJoinRoomCode]);
 
+  const handleOpenScreen = useCallback(
+    (screenId: string) => {
+      const socket = socketRef.current;
+
+      if (!socket || !joinedRoomId) {
+        return;
+      }
+
+      if (screenId === activeScreenId) {
+        return;
+      }
+
+      socket.emit('open-screen', { roomId: joinedRoomId, screenId }, (ack: OpenScreenAck) => {
+        if (!ack?.ok || !ack.screen) {
+          setErrorMessage(ack?.error || 'Could not open screen');
+          return;
+        }
+
+        setActiveScreenId(ack.screen.id);
+        setPendingEditorInit({
+          roomId: joinedRoomId,
+          screenId: ack.screen.id,
+          initialYDoc: ack.initialYDoc || [],
+        });
+      });
+    },
+    [activeScreenId, joinedRoomId],
+  );
+
+  const handleModeChange = useCallback(
+    (mode: RoomMode) => {
+      const socket = socketRef.current;
+
+      if (!socket || !joinedRoomId || !isHost) {
+        return;
+      }
+
+      socket.emit('set-room-mode', { roomId: joinedRoomId, mode }, (ack: { ok: boolean; roomState?: RoomState; error?: string }) => {
+        if (!ack?.ok || !ack.roomState) {
+          setErrorMessage(ack?.error || 'Could not update mode');
+          return;
+        }
+
+        setRoomState(ack.roomState);
+        setStatusMessage(`Mode updated to ${mode === 'one_each' ? 'One Screen Each' : 'Single Shared'}`);
+      });
+    },
+    [isHost, joinedRoomId],
+  );
+
+  const handleAddSharedScreen = useCallback(() => {
+    const socket = socketRef.current;
+
+    if (!socket || !joinedRoomId || !isHost) {
+      return;
+    }
+
+    socket.emit('add-shared-screen', { roomId: joinedRoomId }, (ack: { ok: boolean; screen?: ScreenInfo; error?: string }) => {
+      if (!ack?.ok || !ack.screen) {
+        setErrorMessage(ack?.error || 'Could not add shared screen');
+        return;
+      }
+
+      setStatusMessage(`Added ${ack.screen.name}`);
+      handleOpenScreen(ack.screen.id);
+    });
+  }, [handleOpenScreen, isHost, joinedRoomId]);
+
   const goHome = useCallback(() => {
     socketRef.current?.emit('leave-room');
     destroyCollaboration();
 
     setScreen('home');
     setJoinedRoomId('');
+    setActiveScreenId('');
     setUsers([]);
+    setRoomState(null);
     setPendingEditorInit(null);
     setStatusMessage('');
     setErrorMessage('');
@@ -557,7 +742,7 @@ function App() {
         ) : null}
 
         {screen === 'room' ? (
-          <div className="grid gap-4 md:grid-cols-[240px_1fr]">
+          <div className="grid gap-4 lg:grid-cols-[290px_1fr]">
             <aside className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div className="mb-3">
                 <span className={connected ? 'rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700' : 'rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700'}>
@@ -573,9 +758,58 @@ function App() {
                   Username: <span className="font-semibold">{username.trim()}</span>
                 </p>
                 <p>
+                  Host: <span className="font-semibold">{roomState?.hostUsername}</span>
+                </p>
+                <p>
                   Users: <span className="font-semibold">{users.length}</span>
                 </p>
               </div>
+
+              {isHost ? (
+                <div className="mb-4 rounded-xl border border-slate-200 bg-white p-3">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Host Controls</p>
+                  <label className="mb-2 block text-xs font-medium text-slate-600">Editing Mode</label>
+                  <select
+                    value={roomState?.mode || 'single_shared'}
+                    onChange={(event) => handleModeChange(event.target.value as RoomMode)}
+                    className="mb-2 h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm"
+                  >
+                    <option value="single_shared">Single Shared Screen</option>
+                    <option value="one_each">One Screen Each</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleAddSharedScreen}
+                    className="h-10 w-full rounded-lg bg-brand-500 text-sm font-semibold text-white hover:bg-brand-600"
+                  >
+                    Add Shared Screen
+                  </button>
+                </div>
+              ) : null}
+
+              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-500">Screens</h3>
+              <ul className="mb-4 space-y-2 text-sm">
+                {(roomState?.screens || []).map((screenItem) => {
+                  const isActive = activeScreenId === screenItem.id;
+                  const isEditable = screenItem.type === 'shared' || screenItem.ownerUsername === username.trim();
+
+                  return (
+                    <li key={screenItem.id}>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenScreen(screenItem.id)}
+                        className={isActive ? 'w-full rounded-lg border border-brand-500 bg-brand-50 px-2 py-2 text-left' : 'w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-left'}
+                      >
+                        <p className="font-semibold text-slate-700">{screenItem.name}</p>
+                        <p className="text-xs text-slate-500">
+                          {screenItem.type === 'shared' ? 'Shared' : `Personal: ${screenItem.ownerUsername}`}
+                        </p>
+                        <p className="text-xs text-slate-500">{isEditable ? 'Editable' : 'Read only'}</p>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
 
               <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-500">Active Users</h3>
               <ul className="space-y-2 text-sm">
@@ -597,11 +831,20 @@ function App() {
             </aside>
 
             <div className="rounded-2xl border border-slate-200 bg-slate-100 p-4">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-slate-700">
+                  {activeScreen?.name || 'No screen selected'}
+                </p>
+                <span className={canEditActiveScreen ? 'rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700' : 'rounded-full bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-600'}>
+                  {canEditActiveScreen ? 'You can edit' : 'Read only'}
+                </span>
+              </div>
+
               <div className="doc-editor mx-auto max-w-3xl rounded-xl bg-white shadow-sm">
                 <div ref={setQuillContainerNode} className="doc-editor-surface" />
               </div>
               <p className="mt-2 text-sm text-slate-500">
-                Click anywhere in the page and write together. Live cursor names are visible while typing.
+                Shared screens are editable by all. Personal screens are editable only by the owner and visible to everyone.
               </p>
             </div>
           </div>
