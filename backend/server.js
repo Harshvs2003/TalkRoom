@@ -8,6 +8,7 @@ require('dotenv').config();
 const PORT = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const ROOM_ID_LENGTH = 6;
+const EMPTY_ROOM_TTL_MS = Number(process.env.EMPTY_ROOM_TTL_MS || 120000);
 
 const app = express();
 const server = http.createServer(app);
@@ -34,6 +35,7 @@ const io = new Server(server, {
 });
 
 const rooms = new Map();
+const roomCleanupTimers = new Map();
 
 const generateCode = (length) => {
   const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -96,6 +98,36 @@ const emitRoomState = (roomId) => {
   io.to(roomId).emit('room-state', toPublicRoomState(room));
 };
 
+const clearRoomCleanupTimer = (roomId) => {
+  const timer = roomCleanupTimers.get(roomId);
+
+  if (timer) {
+    clearTimeout(timer);
+    roomCleanupTimers.delete(roomId);
+  }
+};
+
+const scheduleRoomCleanup = (roomId) => {
+  clearRoomCleanupTimer(roomId);
+
+  const timer = setTimeout(() => {
+    const room = rooms.get(roomId);
+
+    if (!room) {
+      roomCleanupTimers.delete(roomId);
+      return;
+    }
+
+    if (room.users.length === 0) {
+      rooms.delete(roomId);
+    }
+
+    roomCleanupTimers.delete(roomId);
+  }, EMPTY_ROOM_TTL_MS);
+
+  roomCleanupTimers.set(roomId, timer);
+};
+
 const ensurePersonalDoc = (room, username) => {
   const docId = personalDocId(username);
   const existing = room.docs.find((doc) => doc.id === docId);
@@ -124,7 +156,8 @@ const canEditDoc = (doc, username) => {
   return doc.ownerUsername === username;
 };
 
-const leaveCurrentRoom = (socket) => {
+const leaveCurrentRoom = (socket, options = {}) => {
+  const explicitLeave = Boolean(options.explicitLeave);
   const roomId = socket.data.roomId;
 
   if (!roomId || !rooms.has(roomId)) {
@@ -134,13 +167,28 @@ const leaveCurrentRoom = (socket) => {
   const room = rooms.get(roomId);
   const leavingUsername = socket.data.username;
 
+  // If host intentionally leaves via "Leave Room", close room for everyone immediately.
+  if (explicitLeave && room.hostUsername === leavingUsername) {
+    clearRoomCleanupTimer(roomId);
+    io.to(roomId).emit('room-closed', {
+      message: 'Host ended this room.',
+    });
+    rooms.delete(roomId);
+    socket.leave(roomId);
+    socket.data.roomId = null;
+    socket.data.username = null;
+    return;
+  }
+
   room.users = room.users.filter((user) => user.socketId !== socket.id);
 
   socket.leave(roomId);
 
   if (room.users.length === 0) {
-    rooms.delete(roomId);
+    scheduleRoomCleanup(roomId);
   } else {
+    clearRoomCleanupTimer(roomId);
+
     if (room.hostUsername === leavingUsername) {
       room.hostUsername = room.users[0].username;
     }
@@ -234,6 +282,7 @@ io.on('connection', (socket) => {
     }
 
     const room = rooms.get(roomId);
+    clearRoomCleanupTimer(roomId);
     const usernameTaken = room.users.some(
       (user) => user.username.toLowerCase() === username.toLowerCase(),
     );
@@ -371,11 +420,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('leave-room', () => {
-    leaveCurrentRoom(socket);
+    leaveCurrentRoom(socket, { explicitLeave: true });
   });
 
   socket.on('disconnect', () => {
-    leaveCurrentRoom(socket);
+    leaveCurrentRoom(socket, { explicitLeave: false });
   });
 });
 

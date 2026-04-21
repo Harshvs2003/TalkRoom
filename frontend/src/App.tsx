@@ -13,6 +13,9 @@ import 'quill/dist/quill.snow.css';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000';
 const USERNAME_STORAGE_KEY = 'talkroom_username';
+const REMEMBER_NAME_KEY = 'talkroom_remember_name';
+const SESSION_USERNAME_KEY = 'talkroom_session_username';
+const LAST_ROOM_KEY = 'talkroom_last_room';
 
 type AppScreen = 'home' | 'created' | 'room';
 type CreateMode = 'auto' | 'custom';
@@ -54,6 +57,10 @@ type RealtimePayload = {
   update: number[];
 };
 
+type RoomClosedPayload = {
+  message?: string;
+};
+
 type DocModel = {
   info: DocInfo;
   ydoc: Y.Doc;
@@ -87,6 +94,8 @@ function App() {
   const socketRef = useRef<Socket | null>(null);
   const roomIdRef = useRef('');
   const usernameRef = useRef('');
+  const restoreAttemptedRef = useRef(false);
+  const restoreRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const docModelsRef = useRef(new Map<string, DocModel>());
   const editorInstancesRef = useRef(new Map<string, EditorInstance>());
@@ -95,7 +104,16 @@ function App() {
   const [appScreen, setAppScreen] = useState<AppScreen>('home');
   const [connected, setConnected] = useState(false);
 
-  const [username, setUsername] = useState('');
+  const [rememberName, setRememberName] = useState(() => localStorage.getItem(REMEMBER_NAME_KEY) === '1');
+  const [username, setUsername] = useState(() => {
+    const remembered = localStorage.getItem(REMEMBER_NAME_KEY) === '1';
+
+    if (remembered) {
+      return localStorage.getItem(USERNAME_STORAGE_KEY) || '';
+    }
+
+    return sessionStorage.getItem(SESSION_USERNAME_KEY) || '';
+  });
   const [createMode, setCreateMode] = useState<CreateMode>('auto');
   const [createRoomInput, setCreateRoomInput] = useState('');
   const [joinRoomInput, setJoinRoomInput] = useState('');
@@ -117,6 +135,30 @@ function App() {
   useEffect(() => {
     usernameRef.current = username.trim();
   }, [username]);
+
+  useEffect(() => {
+    localStorage.setItem(REMEMBER_NAME_KEY, rememberName ? '1' : '0');
+  }, [rememberName]);
+
+  useEffect(() => {
+    const cleanName = username.trim();
+
+    if (cleanName) {
+      sessionStorage.setItem(SESSION_USERNAME_KEY, cleanName);
+    } else {
+      sessionStorage.removeItem(SESSION_USERNAME_KEY);
+    }
+
+    if (rememberName) {
+      if (cleanName) {
+        localStorage.setItem(USERNAME_STORAGE_KEY, cleanName);
+      } else {
+        localStorage.removeItem(USERNAME_STORAGE_KEY);
+      }
+    } else {
+      localStorage.removeItem(USERNAME_STORAGE_KEY);
+    }
+  }, [rememberName, username]);
 
   const canEditDoc = useCallback(
     (doc: DocInfo) => {
@@ -331,11 +373,6 @@ function App() {
   }, [appScreen, bindEditorToDoc, roomState]);
 
   useEffect(() => {
-    const storedName = localStorage.getItem(USERNAME_STORAGE_KEY);
-    if (storedName) {
-      setUsername(storedName);
-    }
-
     const socket = io(BACKEND_URL, {
       autoConnect: true,
       transports: ['websocket', 'polling'],
@@ -345,6 +382,7 @@ function App() {
 
     const handleConnect = () => {
       setConnected(true);
+      restoreAttemptedRef.current = false;
     };
 
     const handleDisconnect = () => {
@@ -386,12 +424,24 @@ function App() {
       applyAwarenessUpdate(model.awareness, Uint8Array.from(payload.update), 'remote');
     };
 
+    const handleRoomClosed = (payload: RoomClosedPayload) => {
+      destroyAllDocs();
+      sessionStorage.removeItem(LAST_ROOM_KEY);
+      setAppScreen('home');
+      setJoinedRoomId('');
+      setUsers([]);
+      setRoomState(null);
+      setStatusMessage('');
+      setErrorMessage(payload?.message || 'Room was closed by host.');
+    };
+
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('users-update', handleUsersUpdate);
     socket.on('room-state', handleRoomState);
     socket.on('yjs-update', handleYjsUpdate);
     socket.on('awareness-update', handleAwarenessUpdate);
+    socket.on('room-closed', handleRoomClosed);
 
     return () => {
       socket.emit('leave-room');
@@ -401,10 +451,11 @@ function App() {
       socket.off('room-state', handleRoomState);
       socket.off('yjs-update', handleYjsUpdate);
       socket.off('awareness-update', handleAwarenessUpdate);
+      socket.off('room-closed', handleRoomClosed);
       socket.disconnect();
       destroyAllDocs();
     };
-  }, [bindEditorToDoc, destroyAllDocs, ensureDocModels]);
+  }, [destroyAllDocs]);
 
   useEffect(() => {
     docModelsRef.current.forEach((model) => {
@@ -464,16 +515,22 @@ function App() {
   const validateRoomCode = useCallback((roomCode: string) => /^[A-Z0-9]{3,12}$/.test(roomCode), []);
 
   const joinRoom = useCallback(
-    (roomCode: string) => {
+    (roomCode: string, options?: { silent?: boolean; restored?: boolean }) => {
       const socket = socketRef.current;
+      const silent = Boolean(options?.silent);
+      const restored = Boolean(options?.restored);
 
       if (!socket) {
-        setErrorMessage('Socket is not ready yet.');
+        if (!silent) {
+          setErrorMessage('Socket is not ready yet.');
+        }
         return;
       }
 
       if (!connected) {
-        setErrorMessage('Still connecting to server. Please wait a moment.');
+        if (!silent) {
+          setErrorMessage('Still connecting to server. Please wait a moment.');
+        }
         return;
       }
 
@@ -483,15 +540,18 @@ function App() {
 
       const normalized = roomCode.trim().toUpperCase();
       if (!validateRoomCode(normalized)) {
-        setErrorMessage('Invalid room code');
+        if (!silent) {
+          setErrorMessage('Invalid room code');
+        }
         return;
       }
 
-      setErrorMessage('');
-      setStatusMessage('');
+      if (!silent) {
+        setErrorMessage('');
+        setStatusMessage('');
+      }
 
       const cleanUsername = username.trim();
-      localStorage.setItem(USERNAME_STORAGE_KEY, cleanUsername);
 
       socket.emit(
         'join-room',
@@ -501,7 +561,24 @@ function App() {
         },
         (ack: JoinRoomAck) => {
           if (!ack?.ok || !ack.roomId || !ack.roomState) {
-            setErrorMessage(ack?.error || 'Unable to join room.');
+            const message = ack?.error || 'Unable to join room.';
+
+            // Refresh can race with old socket disconnect; retry once shortly for restore flow.
+            if (restored && message === 'Username already exists in this room') {
+              if (restoreRetryTimeoutRef.current) {
+                clearTimeout(restoreRetryTimeoutRef.current);
+              }
+
+              restoreRetryTimeoutRef.current = setTimeout(() => {
+                joinRoom(roomCode, { silent: true, restored: true });
+              }, 700);
+              return;
+            }
+
+            sessionStorage.removeItem(LAST_ROOM_KEY);
+            if (!silent) {
+              setErrorMessage(message);
+            }
             return;
           }
 
@@ -512,12 +589,32 @@ function App() {
           setJoinRoomInput(ack.roomId);
           setUsers(Array.isArray(ack.users) ? ack.users : []);
           setAppScreen('room');
-          setStatusMessage('Joined room successfully');
+          sessionStorage.setItem(LAST_ROOM_KEY, ack.roomId);
+
+          if (!silent) {
+            setStatusMessage(restored ? 'Session restored successfully' : 'Joined room successfully');
+          }
         },
       );
     },
     [connected, destroyAllDocs, ensureDocModels, username, validateRoomCode, validateUsername],
   );
+
+  useEffect(() => {
+    if (!connected || appScreen === 'room' || restoreAttemptedRef.current) {
+      return;
+    }
+
+    const lastRoom = sessionStorage.getItem(LAST_ROOM_KEY);
+    const currentUsername = usernameRef.current;
+
+    if (!lastRoom || !currentUsername) {
+      return;
+    }
+
+    restoreAttemptedRef.current = true;
+    joinRoom(lastRoom, { silent: true, restored: true });
+  }, [appScreen, connected, joinRoom]);
 
   const handleCreateRoom = useCallback(() => {
     const socket = socketRef.current;
@@ -609,6 +706,7 @@ function App() {
   const goHome = useCallback(() => {
     socketRef.current?.emit('leave-room');
     destroyAllDocs();
+    sessionStorage.removeItem(LAST_ROOM_KEY);
 
     setAppScreen('home');
     setJoinedRoomId('');
@@ -617,6 +715,12 @@ function App() {
     setStatusMessage('');
     setErrorMessage('');
   }, [destroyAllDocs]);
+
+  useEffect(() => () => {
+    if (restoreRetryTimeoutRef.current) {
+      clearTimeout(restoreRetryTimeoutRef.current);
+    }
+  }, []);
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_0%_0%,_#d1fae5,_#ecfeff_44%,_#f8fafc_100%)] px-4 py-8 font-sans text-slate-800 md:py-12">
@@ -637,6 +741,15 @@ function App() {
               placeholder="Enter username"
               className="h-11 rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
             />
+            <label className="flex items-center gap-2 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={rememberName}
+                onChange={(event) => setRememberName(event.target.checked)}
+                className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+              />
+              Remember this name on this device
+            </label>
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <p className="mb-2 text-sm font-semibold text-slate-700">Create Room</p>
