@@ -61,6 +61,10 @@ type RoomClosedPayload = {
   message?: string;
 };
 
+type ParticipantRemovedPayload = {
+  message?: string;
+};
+
 type DocModel = {
   info: DocInfo;
   ydoc: Y.Doc;
@@ -435,6 +439,17 @@ function App() {
       setErrorMessage(payload?.message || 'Room was closed by host.');
     };
 
+    const handleParticipantRemoved = (payload: ParticipantRemovedPayload) => {
+      destroyAllDocs();
+      sessionStorage.removeItem(LAST_ROOM_KEY);
+      setAppScreen('home');
+      setJoinedRoomId('');
+      setUsers([]);
+      setRoomState(null);
+      setStatusMessage('');
+      setErrorMessage(payload?.message || 'You were removed from this room by host.');
+    };
+
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('users-update', handleUsersUpdate);
@@ -442,6 +457,7 @@ function App() {
     socket.on('yjs-update', handleYjsUpdate);
     socket.on('awareness-update', handleAwarenessUpdate);
     socket.on('room-closed', handleRoomClosed);
+    socket.on('participant-removed', handleParticipantRemoved);
 
     return () => {
       socket.emit('leave-room');
@@ -452,6 +468,7 @@ function App() {
       socket.off('yjs-update', handleYjsUpdate);
       socket.off('awareness-update', handleAwarenessUpdate);
       socket.off('room-closed', handleRoomClosed);
+      socket.off('participant-removed', handleParticipantRemoved);
       socket.disconnect();
       destroyAllDocs();
     };
@@ -703,6 +720,31 @@ function App() {
     [ensureDocModels, isHost, joinedRoomId],
   );
 
+  const handleRemoveParticipant = useCallback(
+    (targetUsername: string) => {
+      const socket = socketRef.current;
+
+      if (!socket || !joinedRoomId || !isHost) {
+        return;
+      }
+
+      socket.emit(
+        'remove-participant',
+        { roomId: joinedRoomId, targetUsername },
+        (ack: { ok: boolean; error?: string }) => {
+          if (!ack?.ok) {
+            setErrorMessage(ack?.error || 'Could not remove participant');
+            return;
+          }
+
+          setStatusMessage(`${targetUsername} removed from room`);
+          setErrorMessage('');
+        },
+      );
+    },
+    [isHost, joinedRoomId],
+  );
+
   const goHome = useCallback(() => {
     socketRef.current?.emit('leave-room');
     destroyAllDocs();
@@ -885,9 +927,20 @@ function App() {
               <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-500">Active Users</h3>
               <ul className="space-y-2 text-sm">
                 {users.map((name) => (
-                  <li key={name} className="flex items-center gap-2 rounded-lg bg-white px-2 py-1.5">
-                    <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                    <span className="font-medium text-slate-700">{name}</span>
+                  <li key={name} className="flex items-center justify-between gap-2 rounded-lg bg-white px-2 py-1.5">
+                    <div className="flex items-center gap-2">
+                      <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                      <span className="font-medium text-slate-700">{name}</span>
+                    </div>
+                    {isHost && name !== username.trim() ? (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveParticipant(name)}
+                        className="rounded-md border border-rose-300 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                      >
+                        Remove
+                      </button>
+                    ) : null}
                   </li>
                 ))}
               </ul>

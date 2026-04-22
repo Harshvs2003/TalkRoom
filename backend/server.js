@@ -58,6 +58,7 @@ const createUniqueRoomId = () => {
 
 const normalizeRoomId = (value) => String(value || '').trim().toUpperCase();
 const normalizeUsername = (value) => String(value || '').trim();
+const usernameKey = (value) => normalizeUsername(value).toLowerCase();
 
 const sharedDocId = 'shared-main';
 const personalDocId = (username) => `personal-${username.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
@@ -236,6 +237,7 @@ io.on('connection', (socket) => {
       users: [],
       hostUsername,
       viewMode: 'single_shared',
+      bannedUsernames: new Set(),
       docs: [
         {
           id: sharedDocId,
@@ -283,6 +285,15 @@ io.on('connection', (socket) => {
 
     const room = rooms.get(roomId);
     clearRoomCleanupTimer(roomId);
+    const normalizedUsernameKey = usernameKey(username);
+
+    if (room.bannedUsernames.has(normalizedUsernameKey)) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'You are not allowed to join this room' });
+      }
+      return;
+    }
+
     const usernameTaken = room.users.some(
       (user) => user.username.toLowerCase() === username.toLowerCase(),
     );
@@ -359,6 +370,70 @@ io.on('connection', (socket) => {
 
     if (typeof ack === 'function') {
       ack({ ok: true, roomState: toPublicRoomState(room) });
+    }
+  });
+
+  socket.on('remove-participant', (payload, ack) => {
+    const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
+    const targetUsername = normalizeUsername(payload?.targetUsername);
+    const requesterUsername = normalizeUsername(socket.data.username);
+
+    if (!roomId || !rooms.has(roomId)) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Room not found' });
+      }
+      return;
+    }
+
+    if (socket.data.roomId !== roomId) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Not a room member' });
+      }
+      return;
+    }
+
+    if (!targetUsername) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Target username is required' });
+      }
+      return;
+    }
+
+    const room = rooms.get(roomId);
+
+    if (room.hostUsername !== requesterUsername) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Only host can remove participants' });
+      }
+      return;
+    }
+
+    if (usernameKey(targetUsername) === usernameKey(requesterUsername)) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Host cannot remove self' });
+      }
+      return;
+    }
+
+    room.bannedUsernames.add(usernameKey(targetUsername));
+
+    const targetUser = room.users.find(
+      (user) => usernameKey(user.username) === usernameKey(targetUsername),
+    );
+
+    if (targetUser) {
+      const targetSocket = io.sockets.sockets.get(targetUser.socketId);
+
+      if (targetSocket) {
+        targetSocket.emit('participant-removed', {
+          message: `You were removed by host from room ${roomId}.`,
+        });
+        leaveCurrentRoom(targetSocket, { explicitLeave: false });
+      }
+    }
+
+    if (typeof ack === 'function') {
+      ack({ ok: true });
     }
   });
 
