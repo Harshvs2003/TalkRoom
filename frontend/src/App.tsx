@@ -16,8 +16,9 @@ const USERNAME_STORAGE_KEY = 'talkroom_username';
 const REMEMBER_NAME_KEY = 'talkroom_remember_name';
 const SESSION_USERNAME_KEY = 'talkroom_session_username';
 const LAST_ROOM_KEY = 'talkroom_last_room';
+const HOST_TOKEN_KEY = 'talkroom_host_token';
 
-type AppScreen = 'home' | 'created' | 'room';
+type AppScreen = 'home' | 'hostAuth' | 'created' | 'room';
 type CreateMode = 'auto' | 'custom';
 type ViewMode = 'single_shared' | 'one_each' | 'both';
 type DocType = 'shared' | 'personal';
@@ -27,6 +28,13 @@ type CreateRoomAck = {
   roomId?: string;
   message?: string;
   error?: string;
+};
+
+type HostProfile = {
+  id: string;
+  name: string;
+  email: string;
+  createdAt: string;
 };
 
 type DocInfo = {
@@ -131,6 +139,14 @@ function App() {
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [copied, setCopied] = useState(false);
+  const [hostToken, setHostToken] = useState(() => localStorage.getItem(HOST_TOKEN_KEY) || '');
+  const [hostProfile, setHostProfile] = useState<HostProfile | null>(null);
+  const [hostAuthMode, setHostAuthMode] = useState<'login' | 'signup'>('login');
+  const [hostNameInput, setHostNameInput] = useState('');
+  const [hostEmailInput, setHostEmailInput] = useState('');
+  const [hostPasswordInput, setHostPasswordInput] = useState('');
+  const [hostAuthBusy, setHostAuthBusy] = useState(false);
+  const [hostAuthMessage, setHostAuthMessage] = useState('');
 
   useEffect(() => {
     roomIdRef.current = joinedRoomId;
@@ -163,6 +179,14 @@ function App() {
       localStorage.removeItem(USERNAME_STORAGE_KEY);
     }
   }, [rememberName, username]);
+
+  useEffect(() => {
+    if (hostToken) {
+      localStorage.setItem(HOST_TOKEN_KEY, hostToken);
+    } else {
+      localStorage.removeItem(HOST_TOKEN_KEY);
+    }
+  }, [hostToken]);
 
   const canEditDoc = useCallback(
     (doc: DocInfo) => {
@@ -520,6 +544,49 @@ function App() {
   const showSharedPane = roomState?.viewMode === 'single_shared' || roomState?.viewMode === 'both';
   const showPersonalGrid = roomState?.viewMode === 'one_each' || roomState?.viewMode === 'both';
 
+  const hostApiRequest = useCallback(
+    async (endpoint: string, options?: RequestInit) => {
+      const response = await fetch(`${BACKEND_URL}${endpoint}`, {
+        method: options?.method || 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(hostToken ? { Authorization: `Bearer ${hostToken}` } : {}),
+          ...(options?.headers || {}),
+        },
+        body: options?.body,
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data?.error || 'Request failed');
+      }
+
+      return data;
+    },
+    [hostToken],
+  );
+
+  const fetchHostProfile = useCallback(async () => {
+    if (!hostToken) {
+      setHostProfile(null);
+      return;
+    }
+
+    try {
+      const data = await hostApiRequest('/api/hosts/me');
+      setHostProfile(data.host || null);
+      setHostAuthMessage('');
+    } catch {
+      setHostProfile(null);
+      setHostToken('');
+    }
+  }, [hostApiRequest, hostToken]);
+
+  useEffect(() => {
+    fetchHostProfile();
+  }, [fetchHostProfile]);
+
   const validateUsername = useCallback(() => {
     if (!username.trim()) {
       setErrorMessage('Please enter a username first.');
@@ -618,7 +685,7 @@ function App() {
   );
 
   useEffect(() => {
-    if (!connected || appScreen === 'room' || restoreAttemptedRef.current) {
+    if (!connected || appScreen !== 'home' || restoreAttemptedRef.current) {
       return;
     }
 
@@ -720,6 +787,65 @@ function App() {
     [ensureDocModels, isHost, joinedRoomId],
   );
 
+  const handleHostAuthSubmit = useCallback(async () => {
+    setHostAuthBusy(true);
+    setHostAuthMessage('');
+
+    try {
+      if (!hostEmailInput.trim() || !hostPasswordInput) {
+        throw new Error('Email and password are required');
+      }
+
+      const payload =
+        hostAuthMode === 'signup'
+          ? {
+              name: hostNameInput.trim(),
+              email: hostEmailInput.trim(),
+              password: hostPasswordInput,
+            }
+          : {
+              email: hostEmailInput.trim(),
+              password: hostPasswordInput,
+            };
+
+      if (hostAuthMode === 'signup' && !payload.name) {
+        throw new Error('Name is required for signup');
+      }
+
+      const data = await hostApiRequest(`/api/hosts/${hostAuthMode}`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+
+      setHostToken(data.token || '');
+      setHostProfile(data.host || null);
+      setHostPasswordInput('');
+      setHostAuthMessage(
+        hostAuthMode === 'signup'
+          ? 'Host account created and logged in.'
+          : 'Logged in successfully.',
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Authentication failed';
+      setHostAuthMessage(message);
+    } finally {
+      setHostAuthBusy(false);
+    }
+  }, [hostApiRequest, hostAuthMode, hostEmailInput, hostNameInput, hostPasswordInput]);
+
+  const handleHostLogout = useCallback(async () => {
+    try {
+      await hostApiRequest('/api/hosts/logout', { method: 'POST' });
+    } catch {
+      // Ignore logout errors because client token is source of truth.
+    }
+
+    setHostToken('');
+    setHostProfile(null);
+    setHostPasswordInput('');
+    setHostAuthMessage('Logged out.');
+  }, [hostApiRequest]);
+
   const handleRemoveParticipant = useCallback(
     (targetUsername: string) => {
       const socket = socketRef.current;
@@ -793,6 +919,14 @@ function App() {
               Remember this name on this device
             </label>
 
+            <button
+              type="button"
+              onClick={() => setAppScreen('hostAuth')}
+              className="h-11 rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+            >
+              Open Host Portal
+            </button>
+
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <p className="mb-2 text-sm font-semibold text-slate-700">Create Room</p>
               <div className="mb-3 grid gap-2 sm:grid-cols-2">
@@ -848,6 +982,93 @@ function App() {
                 Join Room
               </button>
             </div>
+          </div>
+        ) : null}
+
+        {appScreen === 'hostAuth' ? (
+          <div className="mx-auto flex w-full max-w-xl flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-xl font-semibold text-slate-900">Host Portal</h2>
+              <button
+                type="button"
+                onClick={() => setAppScreen('home')}
+                className="h-9 rounded-lg border border-slate-300 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100"
+              >
+                Back
+              </button>
+            </div>
+
+            {hostProfile ? (
+              <div className="space-y-3 rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 text-sm">
+                <p>
+                  Logged in as <span className="font-semibold">{hostProfile.name}</span>
+                </p>
+                <p className="text-slate-600">{hostProfile.email}</p>
+                <button
+                  type="button"
+                  onClick={handleHostLogout}
+                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  Logout Host
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setHostAuthMode('login')}
+                    className={hostAuthMode === 'login' ? 'h-10 rounded-lg bg-brand-500 text-sm font-semibold text-white' : 'h-10 rounded-lg border border-slate-300 bg-white text-sm font-semibold text-slate-700'}
+                  >
+                    Login
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHostAuthMode('signup')}
+                    className={hostAuthMode === 'signup' ? 'h-10 rounded-lg bg-brand-500 text-sm font-semibold text-white' : 'h-10 rounded-lg border border-slate-300 bg-white text-sm font-semibold text-slate-700'}
+                  >
+                    Signup
+                  </button>
+                </div>
+
+                {hostAuthMode === 'signup' ? (
+                  <input
+                    type="text"
+                    value={hostNameInput}
+                    onChange={(event) => setHostNameInput(event.target.value)}
+                    placeholder="Host name"
+                    className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
+                  />
+                ) : null}
+
+                <input
+                  type="email"
+                  value={hostEmailInput}
+                  onChange={(event) => setHostEmailInput(event.target.value)}
+                  placeholder="Host email"
+                  className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
+                />
+
+                <input
+                  type="password"
+                  value={hostPasswordInput}
+                  onChange={(event) => setHostPasswordInput(event.target.value)}
+                  placeholder="Host password"
+                  className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
+                />
+
+                <button
+                  type="button"
+                  onClick={handleHostAuthSubmit}
+                  disabled={hostAuthBusy}
+                  className="h-10 w-full rounded-lg bg-brand-500 text-sm font-semibold text-white hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {hostAuthBusy ? 'Please wait...' : hostAuthMode === 'signup' ? 'Create Host Account' : 'Login Host'}
+                </button>
+
+                {hostAuthMessage ? <p className="text-xs text-slate-600">{hostAuthMessage}</p> : null}
+              </div>
+            )}
           </div>
         ) : null}
 

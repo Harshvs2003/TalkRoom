@@ -2,6 +2,11 @@ const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const Y = require('yjs');
 require('dotenv').config();
 
@@ -9,6 +14,9 @@ const PORT = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const ROOM_ID_LENGTH = 6;
 const EMPTY_ROOM_TTL_MS = Number(process.env.EMPTY_ROOM_TTL_MS || 120000);
+const JWT_SECRET = process.env.JWT_SECRET || 'change-this-in-production';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+const BCRYPT_SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 10);
 
 const app = express();
 const server = http.createServer(app);
@@ -25,6 +33,172 @@ app.use(express.json());
 
 app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok' });
+});
+
+const hostsDataDir = path.join(__dirname, 'data');
+const hostsDataPath = path.join(hostsDataDir, 'hosts.json');
+
+const ensureHostsStore = () => {
+  if (!fs.existsSync(hostsDataDir)) {
+    fs.mkdirSync(hostsDataDir, { recursive: true });
+  }
+
+  if (!fs.existsSync(hostsDataPath)) {
+    fs.writeFileSync(hostsDataPath, '[]', 'utf-8');
+  }
+};
+
+const readHosts = () => {
+  ensureHostsStore();
+
+  try {
+    const raw = fs.readFileSync(hostsDataPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeHosts = (hosts) => {
+  ensureHostsStore();
+  fs.writeFileSync(hostsDataPath, JSON.stringify(hosts, null, 2), 'utf-8');
+};
+
+const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
+
+const toPublicHost = (host) => ({
+  id: host.id,
+  name: host.name,
+  email: host.email,
+  createdAt: host.createdAt,
+});
+
+const issueAuthToken = (host) =>
+  jwt.sign(
+    {
+      sub: host.id,
+      email: host.email,
+      name: host.name,
+    },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN },
+  );
+
+const authMiddleware = (req, res, next) => {
+  const authHeader = String(req.headers.authorization || '');
+
+  if (!authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ ok: false, error: 'Unauthorized' });
+    return;
+  }
+
+  const token = authHeader.slice(7).trim();
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.auth = payload;
+    next();
+  } catch {
+    res.status(401).json({ ok: false, error: 'Invalid or expired token' });
+  }
+};
+
+app.post('/api/hosts/signup', async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const email = normalizeEmail(req.body?.email);
+  const password = String(req.body?.password || '');
+
+  if (!name || !email || !password) {
+    res.status(400).json({ ok: false, error: 'Name, email, and password are required' });
+    return;
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    res.status(400).json({ ok: false, error: 'Enter a valid email address' });
+    return;
+  }
+
+  if (password.length < 8) {
+    res.status(400).json({ ok: false, error: 'Password must be at least 8 characters' });
+    return;
+  }
+
+  const hosts = readHosts();
+  const existing = hosts.find((host) => host.email === email);
+
+  if (existing) {
+    res.status(409).json({ ok: false, error: 'Host account already exists with this email' });
+    return;
+  }
+
+  const passwordHash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+  const newHost = {
+    id: crypto.randomUUID(),
+    name,
+    email,
+    passwordHash,
+    createdAt: new Date().toISOString(),
+  };
+
+  hosts.push(newHost);
+  writeHosts(hosts);
+
+  res.status(201).json({
+    ok: true,
+    host: toPublicHost(newHost),
+    token: issueAuthToken(newHost),
+  });
+});
+
+app.post('/api/hosts/login', async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const password = String(req.body?.password || '');
+
+  if (!email || !password) {
+    res.status(400).json({ ok: false, error: 'Email and password are required' });
+    return;
+  }
+
+  const hosts = readHosts();
+  const host = hosts.find((item) => item.email === email);
+
+  if (!host) {
+    res.status(401).json({ ok: false, error: 'Invalid email or password' });
+    return;
+  }
+
+  const passwordMatched = await bcrypt.compare(password, host.passwordHash);
+
+  if (!passwordMatched) {
+    res.status(401).json({ ok: false, error: 'Invalid email or password' });
+    return;
+  }
+
+  res.status(200).json({
+    ok: true,
+    host: toPublicHost(host),
+    token: issueAuthToken(host),
+  });
+});
+
+app.get('/api/hosts/me', authMiddleware, (req, res) => {
+  const hosts = readHosts();
+  const host = hosts.find((item) => item.id === req.auth.sub);
+
+  if (!host) {
+    res.status(401).json({ ok: false, error: 'Host account not found' });
+    return;
+  }
+
+  res.status(200).json({
+    ok: true,
+    host: toPublicHost(host),
+  });
+});
+
+app.post('/api/hosts/logout', (_req, res) => {
+  res.status(200).json({ ok: true });
 });
 
 const io = new Server(server, {
