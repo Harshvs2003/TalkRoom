@@ -13,6 +13,7 @@ require('dotenv').config();
 const PORT = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const ROOM_ID_LENGTH = 6;
+const PRIVATE_ROOM_CODE_LENGTH = 10;
 const EMPTY_ROOM_TTL_MS = Number(process.env.EMPTY_ROOM_TTL_MS || 120000);
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
@@ -37,6 +38,7 @@ app.get('/health', (_req, res) => {
 
 const hostsDataDir = path.join(__dirname, 'data');
 const hostsDataPath = path.join(hostsDataDir, 'hosts.json');
+const privateRoomsDataPath = path.join(hostsDataDir, 'private-rooms.json');
 
 const ensureHostsStore = () => {
   if (!fs.existsSync(hostsDataDir)) {
@@ -65,6 +67,27 @@ const writeHosts = (hosts) => {
   fs.writeFileSync(hostsDataPath, JSON.stringify(hosts, null, 2), 'utf-8');
 };
 
+const readPrivateRooms = () => {
+  ensureHostsStore();
+
+  if (!fs.existsSync(privateRoomsDataPath)) {
+    fs.writeFileSync(privateRoomsDataPath, '[]', 'utf-8');
+  }
+
+  try {
+    const raw = fs.readFileSync(privateRoomsDataPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const writePrivateRooms = (privateRooms) => {
+  ensureHostsStore();
+  fs.writeFileSync(privateRoomsDataPath, JSON.stringify(privateRooms, null, 2), 'utf-8');
+};
+
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
 
 const toPublicHost = (host) => ({
@@ -84,6 +107,8 @@ const issueAuthToken = (host) =>
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN },
   );
+
+const getHostById = (hostId) => readHosts().find((host) => host.id === hostId) || null;
 
 const authMiddleware = (req, res, next) => {
   const authHeader = String(req.headers.authorization || '');
@@ -201,6 +226,84 @@ app.post('/api/hosts/logout', (_req, res) => {
   res.status(200).json({ ok: true });
 });
 
+app.get('/api/private-rooms', authMiddleware, (req, res) => {
+  const host = getHostById(req.auth.sub);
+
+  if (!host) {
+    res.status(401).json({ ok: false, error: 'Host account not found' });
+    return;
+  }
+
+  const privateRooms = readPrivateRooms()
+    .filter((room) => room.hostId === host.id)
+    .map((room) => ({
+      id: room.id,
+      name: room.name,
+      roomCode: room.roomCode,
+      hostDisplayName: room.hostDisplayName || host.name,
+      createdAt: room.createdAt,
+      updatedAt: room.updatedAt,
+    }));
+
+  res.status(200).json({ ok: true, privateRooms });
+});
+
+app.post('/api/private-rooms', authMiddleware, async (req, res) => {
+  const host = getHostById(req.auth.sub);
+
+  if (!host) {
+    res.status(401).json({ ok: false, error: 'Host account not found' });
+    return;
+  }
+
+  const name = String(req.body?.name || '').trim();
+  const joinPasscode = String(req.body?.joinPasscode || '');
+  const hostDisplayName = String(req.body?.hostDisplayName || host.name).trim();
+
+  if (!name) {
+    res.status(400).json({ ok: false, error: 'Room name is required' });
+    return;
+  }
+
+  if (joinPasscode.length < 4) {
+    res.status(400).json({ ok: false, error: 'Join passcode must be at least 4 characters' });
+    return;
+  }
+
+  const privateRooms = readPrivateRooms();
+  const roomCode = createUniquePrivateRoomCode();
+  const joinPasscodeHash = await bcrypt.hash(joinPasscode, BCRYPT_SALT_ROUNDS);
+  const now = new Date().toISOString();
+
+  const newPrivateRoom = {
+    id: crypto.randomUUID(),
+    hostId: host.id,
+    hostName: host.name,
+    hostDisplayName: hostDisplayName || host.name,
+    name,
+    roomCode,
+    joinPasscodeHash,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  privateRooms.push(newPrivateRoom);
+  writePrivateRooms(privateRooms);
+  ensureRuntimeRoomFromPrivateRecord(newPrivateRoom);
+
+  res.status(201).json({
+    ok: true,
+    privateRoom: {
+      id: newPrivateRoom.id,
+      name: newPrivateRoom.name,
+      roomCode: newPrivateRoom.roomCode,
+      hostDisplayName: newPrivateRoom.hostDisplayName,
+      createdAt: newPrivateRoom.createdAt,
+      updatedAt: newPrivateRoom.updatedAt,
+    },
+  });
+});
+
 const io = new Server(server, {
   cors: {
     origin: allowedOrigins,
@@ -230,6 +333,20 @@ const createUniqueRoomId = () => {
   return roomId;
 };
 
+const createUniquePrivateRoomCode = () => {
+  const privateRooms = readPrivateRooms();
+  let roomCode = generateCode(PRIVATE_ROOM_CODE_LENGTH);
+
+  while (
+    privateRooms.some((room) => room.roomCode === roomCode) ||
+    rooms.has(roomCode)
+  ) {
+    roomCode = generateCode(PRIVATE_ROOM_CODE_LENGTH);
+  }
+
+  return roomCode;
+};
+
 const normalizeRoomId = (value) => String(value || '').trim().toUpperCase();
 const normalizeUsername = (value) => String(value || '').trim();
 const usernameKey = (value) => normalizeUsername(value).toLowerCase();
@@ -246,6 +363,7 @@ const toPublicDoc = (doc) => ({
 
 const toPublicRoomState = (room) => ({
   hostUsername: room.hostUsername,
+  roomType: room.roomType || 'temporary',
   viewMode: room.viewMode,
   docs: room.docs.map(toPublicDoc),
 });
@@ -280,6 +398,36 @@ const clearRoomCleanupTimer = (roomId) => {
     clearTimeout(timer);
     roomCleanupTimers.delete(roomId);
   }
+};
+
+const ensureRuntimeRoomFromPrivateRecord = (privateRoomRecord) => {
+  const roomId = privateRoomRecord.roomCode;
+  const existing = rooms.get(roomId);
+
+  if (existing) {
+    return existing;
+  }
+
+  const room = {
+    users: [],
+    hostUsername: privateRoomRecord.hostDisplayName || privateRoomRecord.hostName || 'Host',
+    hostOwnerId: privateRoomRecord.hostId,
+    roomType: 'private',
+    viewMode: 'single_shared',
+    bannedUsernames: new Set(),
+    docs: [
+      {
+        id: sharedDocId,
+        name: 'Shared Screen',
+        type: 'shared',
+        ownerUsername: null,
+        ydoc: new Y.Doc(),
+      },
+    ],
+  };
+
+  rooms.set(roomId, room);
+  return room;
 };
 
 const scheduleRoomCleanup = (roomId) => {
@@ -331,6 +479,14 @@ const canEditDoc = (doc, username) => {
   return doc.ownerUsername === username;
 };
 
+const isHostActor = (room, socket) => {
+  if (room.roomType === 'private' && room.hostOwnerId && socket.data.hostId) {
+    return room.hostOwnerId === socket.data.hostId;
+  }
+
+  return room.hostUsername === socket.data.username;
+};
+
 const leaveCurrentRoom = (socket, options = {}) => {
   const explicitLeave = Boolean(options.explicitLeave);
   const roomId = socket.data.roomId;
@@ -343,7 +499,7 @@ const leaveCurrentRoom = (socket, options = {}) => {
   const leavingUsername = socket.data.username;
 
   // If host intentionally leaves via "Leave Room", close room for everyone immediately.
-  if (explicitLeave && room.hostUsername === leavingUsername) {
+  if (explicitLeave && isHostActor(room, socket)) {
     clearRoomCleanupTimer(roomId);
     io.to(roomId).emit('room-closed', {
       message: 'Host ended this room.',
@@ -360,11 +516,15 @@ const leaveCurrentRoom = (socket, options = {}) => {
   socket.leave(roomId);
 
   if (room.users.length === 0) {
-    scheduleRoomCleanup(roomId);
+    if (room.roomType === 'private') {
+      clearRoomCleanupTimer(roomId);
+    } else {
+      scheduleRoomCleanup(roomId);
+    }
   } else {
     clearRoomCleanupTimer(roomId);
 
-    if (room.hostUsername === leavingUsername) {
+    if (room.roomType !== 'private' && room.hostUsername === leavingUsername) {
       room.hostUsername = room.users[0].username;
     }
 
@@ -374,6 +534,7 @@ const leaveCurrentRoom = (socket, options = {}) => {
 
   socket.data.roomId = null;
   socket.data.username = null;
+  socket.data.hostId = null;
 };
 
 io.on('connection', (socket) => {
@@ -410,6 +571,8 @@ io.on('connection', (socket) => {
     rooms.set(roomId, {
       users: [],
       hostUsername,
+      hostOwnerId: null,
+      roomType: 'temporary',
       viewMode: 'single_shared',
       bannedUsernames: new Set(),
       docs: [
@@ -431,6 +594,18 @@ io.on('connection', (socket) => {
   socket.on('join-room', (payload, ack) => {
     const roomId = normalizeRoomId(payload?.roomId);
     const username = normalizeUsername(payload?.username);
+    const joinPasscode = String(payload?.joinPasscode || '');
+    const hostToken = String(payload?.hostToken || '');
+    let joiningHostId = null;
+
+    if (hostToken) {
+      try {
+        const decoded = jwt.verify(hostToken, JWT_SECRET);
+        joiningHostId = decoded?.sub || null;
+      } catch {
+        joiningHostId = null;
+      }
+    }
 
     if (!/^[A-Z0-9]{3,12}$/.test(roomId)) {
       if (typeof ack === 'function') {
@@ -446,7 +621,20 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (!rooms.has(roomId)) {
+    const privateRoomRecord = readPrivateRooms().find((room) => room.roomCode === roomId);
+
+    if (privateRoomRecord) {
+      const passcodeValid = bcrypt.compareSync(joinPasscode, privateRoomRecord.joinPasscodeHash);
+
+      if (!passcodeValid) {
+        if (typeof ack === 'function') {
+          ack({ ok: false, error: 'Invalid room passcode' });
+        }
+        return;
+      }
+
+      ensureRuntimeRoomFromPrivateRecord(privateRoomRecord);
+    } else if (!rooms.has(roomId)) {
       if (typeof ack === 'function') {
         ack({ ok: false, error: 'Room does not exist' });
       }
@@ -459,6 +647,13 @@ io.on('connection', (socket) => {
 
     const room = rooms.get(roomId);
     clearRoomCleanupTimer(roomId);
+    if (room.roomType === 'private' && privateRoomRecord) {
+      room.hostOwnerId = privateRoomRecord.hostId;
+      room.hostUsername = privateRoomRecord.hostDisplayName || privateRoomRecord.hostName || room.hostUsername;
+      if (joiningHostId && joiningHostId === privateRoomRecord.hostId) {
+        room.hostUsername = username;
+      }
+    }
     const normalizedUsernameKey = usernameKey(username);
 
     if (room.bannedUsernames.has(normalizedUsernameKey)) {
@@ -487,6 +682,7 @@ io.on('connection', (socket) => {
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.username = username;
+    socket.data.hostId = joiningHostId;
 
     emitUsersUpdate(roomId);
     emitRoomState(roomId);
@@ -525,7 +721,7 @@ io.on('connection', (socket) => {
 
     const room = rooms.get(roomId);
 
-    if (room.hostUsername !== socket.data.username) {
+    if (!isHostActor(room, socket)) {
       if (typeof ack === 'function') {
         ack({ ok: false, error: 'Only host can change view mode' });
       }
@@ -575,7 +771,7 @@ io.on('connection', (socket) => {
 
     const room = rooms.get(roomId);
 
-    if (room.hostUsername !== requesterUsername) {
+    if (!isHostActor(room, socket)) {
       if (typeof ack === 'function') {
         ack({ ok: false, error: 'Only host can remove participants' });
       }

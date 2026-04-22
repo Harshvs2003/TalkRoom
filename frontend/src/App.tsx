@@ -16,6 +16,7 @@ const USERNAME_STORAGE_KEY = 'talkroom_username';
 const REMEMBER_NAME_KEY = 'talkroom_remember_name';
 const SESSION_USERNAME_KEY = 'talkroom_session_username';
 const LAST_ROOM_KEY = 'talkroom_last_room';
+const LAST_ROOM_PASSCODE_KEY = 'talkroom_last_room_passcode';
 const HOST_TOKEN_KEY = 'talkroom_host_token';
 
 type AppScreen = 'home' | 'hostAuth' | 'created' | 'room';
@@ -37,6 +38,15 @@ type HostProfile = {
   createdAt: string;
 };
 
+type PrivateRoom = {
+  id: string;
+  name: string;
+  roomCode: string;
+  hostDisplayName: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type DocInfo = {
   id: string;
   name: string;
@@ -46,6 +56,7 @@ type DocInfo = {
 
 type RoomState = {
   hostUsername: string;
+  roomType?: 'temporary' | 'private';
   viewMode: ViewMode;
   docs: DocInfo[];
 };
@@ -129,6 +140,7 @@ function App() {
   const [createMode, setCreateMode] = useState<CreateMode>('auto');
   const [createRoomInput, setCreateRoomInput] = useState('');
   const [joinRoomInput, setJoinRoomInput] = useState('');
+  const [joinRoomPasscodeInput, setJoinRoomPasscodeInput] = useState('');
 
   const [createdRoomId, setCreatedRoomId] = useState('');
   const [joinedRoomId, setJoinedRoomId] = useState('');
@@ -147,6 +159,10 @@ function App() {
   const [hostPasswordInput, setHostPasswordInput] = useState('');
   const [hostAuthBusy, setHostAuthBusy] = useState(false);
   const [hostAuthMessage, setHostAuthMessage] = useState('');
+  const [privateRooms, setPrivateRooms] = useState<PrivateRoom[]>([]);
+  const [privateRoomsLoading, setPrivateRoomsLoading] = useState(false);
+  const [privateRoomNameInput, setPrivateRoomNameInput] = useState('');
+  const [privateRoomPasscodeInput, setPrivateRoomPasscodeInput] = useState('');
 
   useEffect(() => {
     roomIdRef.current = joinedRoomId;
@@ -455,6 +471,7 @@ function App() {
     const handleRoomClosed = (payload: RoomClosedPayload) => {
       destroyAllDocs();
       sessionStorage.removeItem(LAST_ROOM_KEY);
+      sessionStorage.removeItem(LAST_ROOM_PASSCODE_KEY);
       setAppScreen('home');
       setJoinedRoomId('');
       setUsers([]);
@@ -466,6 +483,7 @@ function App() {
     const handleParticipantRemoved = (payload: ParticipantRemovedPayload) => {
       destroyAllDocs();
       sessionStorage.removeItem(LAST_ROOM_KEY);
+      sessionStorage.removeItem(LAST_ROOM_PASSCODE_KEY);
       setAppScreen('home');
       setJoinedRoomId('');
       setUsers([]);
@@ -587,6 +605,28 @@ function App() {
     fetchHostProfile();
   }, [fetchHostProfile]);
 
+  const fetchPrivateRooms = useCallback(async () => {
+    if (!hostToken) {
+      setPrivateRooms([]);
+      return;
+    }
+
+    setPrivateRoomsLoading(true);
+
+    try {
+      const data = await hostApiRequest('/api/private-rooms');
+      setPrivateRooms(Array.isArray(data.privateRooms) ? data.privateRooms : []);
+    } catch {
+      setPrivateRooms([]);
+    } finally {
+      setPrivateRoomsLoading(false);
+    }
+  }, [hostApiRequest, hostToken]);
+
+  useEffect(() => {
+    fetchPrivateRooms();
+  }, [fetchPrivateRooms, hostProfile?.id]);
+
   const validateUsername = useCallback(() => {
     if (!username.trim()) {
       setErrorMessage('Please enter a username first.');
@@ -599,10 +639,11 @@ function App() {
   const validateRoomCode = useCallback((roomCode: string) => /^[A-Z0-9]{3,12}$/.test(roomCode), []);
 
   const joinRoom = useCallback(
-    (roomCode: string, options?: { silent?: boolean; restored?: boolean }) => {
+    (roomCode: string, options?: { silent?: boolean; restored?: boolean; joinPasscode?: string }) => {
       const socket = socketRef.current;
       const silent = Boolean(options?.silent);
       const restored = Boolean(options?.restored);
+      const joinPasscode = String(options?.joinPasscode ?? joinRoomPasscodeInput);
 
       if (!socket) {
         if (!silent) {
@@ -642,6 +683,8 @@ function App() {
         {
           roomId: normalized,
           username: cleanUsername,
+          joinPasscode,
+          hostToken: hostToken || undefined,
         },
         (ack: JoinRoomAck) => {
           if (!ack?.ok || !ack.roomId || !ack.roomState) {
@@ -660,6 +703,7 @@ function App() {
             }
 
             sessionStorage.removeItem(LAST_ROOM_KEY);
+            sessionStorage.removeItem(LAST_ROOM_PASSCODE_KEY);
             if (!silent) {
               setErrorMessage(message);
             }
@@ -671,9 +715,11 @@ function App() {
           setRoomState(ack.roomState);
           setJoinedRoomId(ack.roomId);
           setJoinRoomInput(ack.roomId);
+          setJoinRoomPasscodeInput(joinPasscode);
           setUsers(Array.isArray(ack.users) ? ack.users : []);
           setAppScreen('room');
           sessionStorage.setItem(LAST_ROOM_KEY, ack.roomId);
+          sessionStorage.setItem(LAST_ROOM_PASSCODE_KEY, joinPasscode || '');
 
           if (!silent) {
             setStatusMessage(restored ? 'Session restored successfully' : 'Joined room successfully');
@@ -681,7 +727,7 @@ function App() {
         },
       );
     },
-    [connected, destroyAllDocs, ensureDocModels, username, validateRoomCode, validateUsername],
+    [connected, destroyAllDocs, ensureDocModels, hostToken, joinRoomPasscodeInput, username, validateRoomCode, validateUsername],
   );
 
   useEffect(() => {
@@ -690,6 +736,7 @@ function App() {
     }
 
     const lastRoom = sessionStorage.getItem(LAST_ROOM_KEY);
+    const lastRoomPasscode = sessionStorage.getItem(LAST_ROOM_PASSCODE_KEY) || '';
     const currentUsername = usernameRef.current;
 
     if (!lastRoom || !currentUsername) {
@@ -697,7 +744,7 @@ function App() {
     }
 
     restoreAttemptedRef.current = true;
-    joinRoom(lastRoom, { silent: true, restored: true });
+    joinRoom(lastRoom, { silent: true, restored: true, joinPasscode: lastRoomPasscode });
   }, [appScreen, connected, joinRoom]);
 
   const handleCreateRoom = useCallback(() => {
@@ -842,9 +889,50 @@ function App() {
 
     setHostToken('');
     setHostProfile(null);
+    setPrivateRooms([]);
     setHostPasswordInput('');
     setHostAuthMessage('Logged out.');
   }, [hostApiRequest]);
+
+  const handleCreatePrivateRoom = useCallback(async () => {
+    if (!privateRoomNameInput.trim() || !privateRoomPasscodeInput) {
+      setHostAuthMessage('Private room name and passcode are required');
+      return;
+    }
+
+    setHostAuthBusy(true);
+    setHostAuthMessage('');
+
+    try {
+      const data = await hostApiRequest('/api/private-rooms', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: privateRoomNameInput.trim(),
+          joinPasscode: privateRoomPasscodeInput,
+          hostDisplayName: username.trim() || hostProfile?.name || 'Host',
+        }),
+      });
+
+      const created = data?.privateRoom as PrivateRoom | undefined;
+
+      if (created) {
+        setPrivateRooms((prev) => [created, ...prev]);
+        setHostAuthMessage(`Private room created: ${created.roomCode}`);
+        setJoinRoomInput(created.roomCode);
+        setJoinRoomPasscodeInput(privateRoomPasscodeInput);
+      } else {
+        setHostAuthMessage('Private room created');
+      }
+
+      setPrivateRoomNameInput('');
+      setPrivateRoomPasscodeInput('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not create private room';
+      setHostAuthMessage(message);
+    } finally {
+      setHostAuthBusy(false);
+    }
+  }, [hostApiRequest, hostProfile?.name, privateRoomNameInput, privateRoomPasscodeInput, username]);
 
   const handleRemoveParticipant = useCallback(
     (targetUsername: string) => {
@@ -875,6 +963,7 @@ function App() {
     socketRef.current?.emit('leave-room');
     destroyAllDocs();
     sessionStorage.removeItem(LAST_ROOM_KEY);
+    sessionStorage.removeItem(LAST_ROOM_PASSCODE_KEY);
 
     setAppScreen('home');
     setJoinedRoomId('');
@@ -975,6 +1064,13 @@ function App() {
                 placeholder="Enter room code to join"
                 className="mb-3 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm uppercase tracking-wider outline-none ring-brand-500 transition focus:ring-2"
               />
+              <input
+                type="password"
+                value={joinRoomPasscodeInput}
+                onChange={(event) => setJoinRoomPasscodeInput(event.target.value)}
+                placeholder="Room passcode (only for private rooms)"
+                className="mb-3 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
+              />
               <button
                 type="button"
                 onClick={() => joinRoom(normalizedJoinRoomCode)}
@@ -1000,11 +1096,77 @@ function App() {
             </div>
 
             {hostProfile ? (
-              <div className="space-y-3 rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 text-sm">
-                <p>
-                  Logged in as <span className="font-semibold">{hostProfile.name}</span>
-                </p>
-                <p className="text-slate-600">{hostProfile.email}</p>
+              <div className="space-y-3 text-sm">
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
+                  <p>
+                    Logged in as <span className="font-semibold">{hostProfile.name}</span>
+                  </p>
+                  <p className="text-slate-600">{hostProfile.email}</p>
+                </div>
+
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="mb-2 text-sm font-semibold text-slate-700">Create Permanent Private Room</p>
+                  <input
+                    type="text"
+                    value={privateRoomNameInput}
+                    onChange={(event) => setPrivateRoomNameInput(event.target.value)}
+                    placeholder="Private room name"
+                    className="mb-2 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
+                  />
+                  <input
+                    type="password"
+                    value={privateRoomPasscodeInput}
+                    onChange={(event) => setPrivateRoomPasscodeInput(event.target.value)}
+                    placeholder="Participant join passcode"
+                    className="mb-2 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleCreatePrivateRoom}
+                    disabled={hostAuthBusy}
+                    className="h-10 w-full rounded-lg bg-brand-500 text-sm font-semibold text-white hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {hostAuthBusy ? 'Please wait...' : 'Create 10-char Private Room'}
+                  </button>
+                </div>
+
+                <div className="rounded-xl border border-slate-200 bg-white p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-sm font-semibold text-slate-700">Your Private Rooms</p>
+                    <button
+                      type="button"
+                      onClick={fetchPrivateRooms}
+                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                  {privateRoomsLoading ? (
+                    <p className="text-xs text-slate-500">Loading rooms...</p>
+                  ) : privateRooms.length === 0 ? (
+                    <p className="text-xs text-slate-500">No private rooms yet.</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {privateRooms.map((room) => (
+                        <li key={room.id} className="rounded-lg border border-slate-200 bg-slate-50 p-2">
+                          <p className="font-semibold text-slate-700">{room.name}</p>
+                          <p className="text-xs text-slate-500">Code: {room.roomCode}</p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setJoinRoomInput(room.roomCode);
+                              setAppScreen('home');
+                            }}
+                            className="mt-1 rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                          >
+                            Use code in Join
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
                 <button
                   type="button"
                   onClick={handleHostLogout}
