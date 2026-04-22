@@ -893,9 +893,18 @@ function App() {
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_0%_0%,_#d1fae5,_#ecfeff_44%,_#f8fafc_100%)] px-4 py-8 font-sans text-slate-800 md:py-12">
       <section className="mx-auto w-full max-w-7xl rounded-3xl border border-slate-200 bg-white p-6 shadow-panel md:p-8">
-        <header className="mb-6 border-b border-slate-100 pb-4">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-600">TalkRoom</p>
-          <h1 className="text-2xl font-bold text-slate-900">Collaborative Document</h1>
+        <header className="mb-6 flex items-start justify-between gap-3 border-b border-slate-100 pb-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-600">TalkRoom</p>
+            <h1 className="text-2xl font-bold text-slate-900">Collaborative Document</h1>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAppScreen('hostAuth')}
+            className="h-10 rounded-lg border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            Host Portal
+          </button>
         </header>
 
         {appScreen === 'home' ? (
@@ -918,14 +927,6 @@ function App() {
               />
               Remember this name on this device
             </label>
-
-            <button
-              type="button"
-              onClick={() => setAppScreen('hostAuth')}
-              className="h-11 rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
-            >
-              Open Host Portal
-            </button>
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <p className="mb-2 text-sm font-semibold text-slate-700">Create Room</p>
