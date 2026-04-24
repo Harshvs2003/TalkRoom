@@ -8,6 +8,85 @@
     "roomCode": "ZL6OD3QPJ4",
     "joinPasscodeHash": "$2b$10$5pFMLF306ksJSli1qgpzwOCSXjUktax7zHBHC4AbLLVUK4ZxxYnVS",
     "createdAt": "2026-04-22T13:14:03.013Z",
-    "updatedAt": "2026-04-22T13:14:03.013Z"
+    "updatedAt": "2026-04-22T20:02:10.100Z",
+    "meetings": [
+      {
+        "id": "e41abdcc-84e7-4e1e-ac23-1c4e8191da0c",
+        "name": "Meet- 22nd April - Morning",
+        "status": "closed",
+        "startedAt": "2026-04-22T13:28:00.217Z",
+        "closedAt": "2026-04-22T19:57:50.461Z",
+        "participants": [
+          {
+            "username": "Serius",
+            "firstJoinedAt": "2026-04-22T13:44:11.978Z",
+            "lastJoinedAt": "2026-04-22T19:36:00.444Z",
+            "joinCount": 7
+          },
+          {
+            "username": "Patyam",
+            "firstJoinedAt": "2026-04-22T13:45:22.801Z",
+            "lastJoinedAt": "2026-04-22T13:45:22.801Z",
+            "joinCount": 1
+          }
+        ]
+      },
+      {
+        "id": "ad97ad27-382f-45b7-9743-542c6332e34e",
+        "name": "23rd April Meeting",
+        "status": "open",
+        "startedAt": "2026-04-22T19:58:34.034Z",
+        "closedAt": null,
+        "participants": [
+          {
+            "username": "Serius",
+            "firstJoinedAt": "2026-04-22T20:01:01.589Z",
+            "lastJoinedAt": "2026-04-22T20:02:00.083Z",
+            "joinCount": 2
+          },
+          {
+            "username": "poiuy",
+            "firstJoinedAt": "2026-04-22T20:01:23.603Z",
+            "lastJoinedAt": "2026-04-22T20:02:10.100Z",
+            "joinCount": 4
+          }
+        ]
+      }
+    ],
+    "workspaceName": "Serius Workspace"
+  },
+  {
+    "id": "7b82a01d-9dbb-45df-a6f8-686c4a192841",
+    "hostId": "af9b72b1-15ac-4572-b4f8-c2942ffa28e3",
+    "hostName": "Cereby",
+    "hostDisplayName": "Cereby",
+    "workspaceName": "Cereby Workspace",
+    "roomCode": "A3MP4EW4YU",
+    "joinPasscodeHash": "$2b$10$vculO1xtHU9hYI6sUY7HZuGMgifUuJfbVoQZ/Ke0cqxedIg8TZPCi",
+    "createdAt": "2026-04-24T17:34:21.762Z",
+    "updatedAt": "2026-04-24T17:35:57.022Z",
+    "meetings": [
+      {
+        "id": "0ed2276f-988d-4983-8a96-e6cd096ba73f",
+        "name": "start-20",
+        "status": "open",
+        "startedAt": "2026-04-24T17:34:21.762Z",
+        "closedAt": null,
+        "participants": [
+          {
+            "username": "Cereby",
+            "firstJoinedAt": "2026-04-24T17:34:39.234Z",
+            "lastJoinedAt": "2026-04-24T17:35:55.291Z",
+            "joinCount": 3
+          },
+          {
+            "username": "Serius",
+            "firstJoinedAt": "2026-04-24T17:35:31.027Z",
+            "lastJoinedAt": "2026-04-24T17:35:57.022Z",
+            "joinCount": 3
+          }
+        ]
+      }
+    ]
   }
 ]

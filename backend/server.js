@@ -77,7 +77,42 @@ const readPrivateRooms = () => {
   try {
     const raw = fs.readFileSync(privateRoomsDataPath, 'utf-8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    const privateRooms = Array.isArray(parsed) ? parsed : [];
+    let migrated = false;
+
+    const normalized = privateRooms.map((room) => {
+      const nextRoom = { ...room };
+
+      if (!Array.isArray(nextRoom.meetings)) {
+        const seedName = String(nextRoom.name || 'Meeting 1').trim() || 'Meeting 1';
+        const now = new Date().toISOString();
+        nextRoom.meetings = [
+          {
+            id: crypto.randomUUID(),
+            name: seedName,
+            status: 'open',
+            startedAt: now,
+            closedAt: null,
+            participants: [],
+          },
+        ];
+        nextRoom.workspaceName = nextRoom.workspaceName || `${nextRoom.hostDisplayName || nextRoom.hostName || 'Host'} Workspace`;
+        migrated = true;
+      }
+
+      if (!nextRoom.workspaceName) {
+        nextRoom.workspaceName = `${nextRoom.hostDisplayName || nextRoom.hostName || 'Host'} Workspace`;
+        migrated = true;
+      }
+
+      return nextRoom;
+    });
+
+    if (migrated) {
+      writePrivateRooms(normalized);
+    }
+
+    return normalized;
   } catch {
     return [];
   }
@@ -86,6 +121,51 @@ const readPrivateRooms = () => {
 const writePrivateRooms = (privateRooms) => {
   ensureHostsStore();
   fs.writeFileSync(privateRoomsDataPath, JSON.stringify(privateRooms, null, 2), 'utf-8');
+};
+
+const getOpenMeeting = (privateRoomRecord) =>
+  privateRoomRecord.meetings.find((meeting) => meeting.status === 'open') || null;
+
+const toPublicMeeting = (meeting) => ({
+  id: meeting.id,
+  name: meeting.name,
+  status: meeting.status,
+  startedAt: meeting.startedAt,
+  closedAt: meeting.closedAt || null,
+  participantsCount: Array.isArray(meeting.participants) ? meeting.participants.length : 0,
+  participants: Array.isArray(meeting.participants)
+    ? meeting.participants.map((participant) => ({
+        username: participant.username,
+        firstJoinedAt: participant.firstJoinedAt,
+        lastJoinedAt: participant.lastJoinedAt,
+        joinCount: participant.joinCount,
+      }))
+    : [],
+});
+
+const toPublicPrivateRoom = (privateRoomRecord) => ({
+  id: privateRoomRecord.id,
+  workspaceName: privateRoomRecord.workspaceName,
+  roomCode: privateRoomRecord.roomCode,
+  hostDisplayName: privateRoomRecord.hostDisplayName,
+  createdAt: privateRoomRecord.createdAt,
+  updatedAt: privateRoomRecord.updatedAt,
+  meetings: (privateRoomRecord.meetings || []).map(toPublicMeeting),
+  currentMeeting: getOpenMeeting(privateRoomRecord)
+    ? toPublicMeeting(getOpenMeeting(privateRoomRecord))
+    : null,
+});
+
+const closeOpenMeeting = (privateRoomRecord) => {
+  const openMeeting = getOpenMeeting(privateRoomRecord);
+
+  if (!openMeeting) {
+    return false;
+  }
+
+  openMeeting.status = 'closed';
+  openMeeting.closedAt = new Date().toISOString();
+  return true;
 };
 
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
@@ -236,14 +316,7 @@ app.get('/api/private-rooms', authMiddleware, (req, res) => {
 
   const privateRooms = readPrivateRooms()
     .filter((room) => room.hostId === host.id)
-    .map((room) => ({
-      id: room.id,
-      name: room.name,
-      roomCode: room.roomCode,
-      hostDisplayName: room.hostDisplayName || host.name,
-      createdAt: room.createdAt,
-      updatedAt: room.updatedAt,
-    }));
+    .map((room) => toPublicPrivateRoom(room));
 
   res.status(200).json({ ok: true, privateRooms });
 });
@@ -256,12 +329,13 @@ app.post('/api/private-rooms', authMiddleware, async (req, res) => {
     return;
   }
 
-  const name = String(req.body?.name || '').trim();
+  const meetingName = String(req.body?.meetingName || req.body?.name || '').trim();
+  const workspaceName = String(req.body?.workspaceName || '').trim();
   const joinPasscode = String(req.body?.joinPasscode || '');
   const hostDisplayName = String(req.body?.hostDisplayName || host.name).trim();
 
-  if (!name) {
-    res.status(400).json({ ok: false, error: 'Room name is required' });
+  if (!meetingName) {
+    res.status(400).json({ ok: false, error: 'Meeting name is required' });
     return;
   }
 
@@ -274,17 +348,26 @@ app.post('/api/private-rooms', authMiddleware, async (req, res) => {
   const roomCode = createUniquePrivateRoomCode();
   const joinPasscodeHash = await bcrypt.hash(joinPasscode, BCRYPT_SALT_ROUNDS);
   const now = new Date().toISOString();
+  const firstMeeting = {
+    id: crypto.randomUUID(),
+    name: meetingName,
+    status: 'open',
+    startedAt: now,
+    closedAt: null,
+    participants: [],
+  };
 
   const newPrivateRoom = {
     id: crypto.randomUUID(),
     hostId: host.id,
     hostName: host.name,
     hostDisplayName: hostDisplayName || host.name,
-    name,
+    workspaceName: workspaceName || `${hostDisplayName || host.name} Workspace`,
     roomCode,
     joinPasscodeHash,
     createdAt: now,
     updatedAt: now,
+    meetings: [firstMeeting],
   };
 
   privateRooms.push(newPrivateRoom);
@@ -293,14 +376,101 @@ app.post('/api/private-rooms', authMiddleware, async (req, res) => {
 
   res.status(201).json({
     ok: true,
-    privateRoom: {
-      id: newPrivateRoom.id,
-      name: newPrivateRoom.name,
-      roomCode: newPrivateRoom.roomCode,
-      hostDisplayName: newPrivateRoom.hostDisplayName,
-      createdAt: newPrivateRoom.createdAt,
-      updatedAt: newPrivateRoom.updatedAt,
-    },
+    privateRoom: toPublicPrivateRoom(newPrivateRoom),
+  });
+});
+
+app.post('/api/private-rooms/:privateRoomId/meetings', authMiddleware, (req, res) => {
+  const host = getHostById(req.auth.sub);
+
+  if (!host) {
+    res.status(401).json({ ok: false, error: 'Host account not found' });
+    return;
+  }
+
+  const privateRoomId = String(req.params.privateRoomId || '').trim();
+  const meetingName = String(req.body?.meetingName || '').trim();
+
+  if (!meetingName) {
+    res.status(400).json({ ok: false, error: 'Meeting name is required' });
+    return;
+  }
+
+  const privateRooms = readPrivateRooms();
+  const privateRoom = privateRooms.find((room) => room.id === privateRoomId);
+
+  if (!privateRoom || privateRoom.hostId !== host.id) {
+    res.status(404).json({ ok: false, error: 'Private room not found' });
+    return;
+  }
+
+  const openMeeting = getOpenMeeting(privateRoom);
+
+  if (openMeeting) {
+    res.status(409).json({ ok: false, error: 'Close current meeting before starting a new one' });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  privateRoom.meetings.push({
+    id: crypto.randomUUID(),
+    name: meetingName,
+    status: 'open',
+    startedAt: now,
+    closedAt: null,
+    participants: [],
+  });
+  privateRoom.updatedAt = now;
+
+  writePrivateRooms(privateRooms);
+  ensureRuntimeRoomFromPrivateRecord(privateRoom);
+
+  res.status(201).json({
+    ok: true,
+    privateRoom: toPublicPrivateRoom(privateRoom),
+  });
+});
+
+app.post('/api/private-rooms/:privateRoomId/close-meeting', authMiddleware, (req, res) => {
+  const host = getHostById(req.auth.sub);
+
+  if (!host) {
+    res.status(401).json({ ok: false, error: 'Host account not found' });
+    return;
+  }
+
+  const privateRoomId = String(req.params.privateRoomId || '').trim();
+  const privateRooms = readPrivateRooms();
+  const privateRoom = privateRooms.find((room) => room.id === privateRoomId);
+
+  if (!privateRoom || privateRoom.hostId !== host.id) {
+    res.status(404).json({ ok: false, error: 'Private room not found' });
+    return;
+  }
+
+  const closed = closeOpenMeeting(privateRoom);
+
+  if (!closed) {
+    res.status(409).json({ ok: false, error: 'No open meeting to close' });
+    return;
+  }
+
+  privateRoom.updatedAt = new Date().toISOString();
+  writePrivateRooms(privateRooms);
+
+  const runtimeRoom = rooms.get(privateRoom.roomCode);
+
+  if (runtimeRoom) {
+    io.to(privateRoom.roomCode).emit('room-closed', {
+      message: 'Host closed this meeting.',
+    });
+    clearRoomCleanupTimer(privateRoom.roomCode);
+    rooms.delete(privateRoom.roomCode);
+  }
+
+  res.status(200).json({
+    ok: true,
+    privateRoom: toPublicPrivateRoom(privateRoom),
   });
 });
 
@@ -324,9 +494,10 @@ const generateCode = (length) => {
 };
 
 const createUniqueRoomId = () => {
+  const privateRoomCodes = new Set(readPrivateRooms().map((room) => room.roomCode));
   let roomId = generateCode(ROOM_ID_LENGTH);
 
-  while (rooms.has(roomId)) {
+  while (rooms.has(roomId) || privateRoomCodes.has(roomId)) {
     roomId = generateCode(ROOM_ID_LENGTH);
   }
 
@@ -364,6 +535,7 @@ const toPublicDoc = (doc) => ({
 const toPublicRoomState = (room) => ({
   hostUsername: room.hostUsername,
   roomType: room.roomType || 'temporary',
+  currentMeetingName: room.currentMeetingName || null,
   viewMode: room.viewMode,
   docs: room.docs.map(toPublicDoc),
 });
@@ -402,9 +574,16 @@ const clearRoomCleanupTimer = (roomId) => {
 
 const ensureRuntimeRoomFromPrivateRecord = (privateRoomRecord) => {
   const roomId = privateRoomRecord.roomCode;
+  const activeMeeting = getOpenMeeting(privateRoomRecord);
   const existing = rooms.get(roomId);
 
+  if (!activeMeeting) {
+    return null;
+  }
+
   if (existing) {
+    existing.activeMeetingId = activeMeeting.id;
+    existing.currentMeetingName = activeMeeting.name;
     return existing;
   }
 
@@ -412,7 +591,11 @@ const ensureRuntimeRoomFromPrivateRecord = (privateRoomRecord) => {
     users: [],
     hostUsername: privateRoomRecord.hostDisplayName || privateRoomRecord.hostName || 'Host',
     hostOwnerId: privateRoomRecord.hostId,
+    hostSocketId: null,
     roomType: 'private',
+    privateRoomId: privateRoomRecord.id,
+    activeMeetingId: activeMeeting.id,
+    currentMeetingName: activeMeeting.name,
     viewMode: 'single_shared',
     bannedUsernames: new Set(),
     docs: [
@@ -480,8 +663,14 @@ const canEditDoc = (doc, username) => {
 };
 
 const isHostActor = (room, socket) => {
-  if (room.roomType === 'private' && room.hostOwnerId && socket.data.hostId) {
-    return room.hostOwnerId === socket.data.hostId;
+  if (room.roomType === 'private') {
+    if (room.hostOwnerId && socket.data.hostId) {
+      return room.hostOwnerId === socket.data.hostId;
+    }
+
+    if (room.hostSocketId) {
+      return room.hostSocketId === socket.id;
+    }
   }
 
   return room.hostUsername === socket.data.username;
@@ -500,6 +689,19 @@ const leaveCurrentRoom = (socket, options = {}) => {
 
   // If host intentionally leaves via "Leave Room", close room for everyone immediately.
   if (explicitLeave && isHostActor(room, socket)) {
+    if (room.roomType === 'private' && room.privateRoomId) {
+      const privateRooms = readPrivateRooms();
+      const privateRoom = privateRooms.find((item) => item.id === room.privateRoomId);
+
+      if (privateRoom) {
+        const closed = closeOpenMeeting(privateRoom);
+        if (closed) {
+          privateRoom.updatedAt = new Date().toISOString();
+          writePrivateRooms(privateRooms);
+        }
+      }
+    }
+
     clearRoomCleanupTimer(roomId);
     io.to(roomId).emit('room-closed', {
       message: 'Host ended this room.',
@@ -508,6 +710,7 @@ const leaveCurrentRoom = (socket, options = {}) => {
     socket.leave(roomId);
     socket.data.roomId = null;
     socket.data.username = null;
+    socket.data.hostId = null;
     return;
   }
 
@@ -561,6 +764,13 @@ io.on('connection', (socket) => {
       if (rooms.has(requestedRoomId)) {
         if (typeof ack === 'function') {
           ack({ ok: false, error: 'Room already exists' });
+        }
+        return;
+      }
+
+      if (readPrivateRooms().some((room) => room.roomCode === requestedRoomId)) {
+        if (typeof ack === 'function') {
+          ack({ ok: false, error: 'Room code reserved by a private room' });
         }
         return;
       }
@@ -633,7 +843,14 @@ io.on('connection', (socket) => {
         return;
       }
 
-      ensureRuntimeRoomFromPrivateRecord(privateRoomRecord);
+      const runtimeRoom = ensureRuntimeRoomFromPrivateRecord(privateRoomRecord);
+
+      if (!runtimeRoom) {
+        if (typeof ack === 'function') {
+          ack({ ok: false, error: 'No active meeting. Host needs to start a new meeting.' });
+        }
+        return;
+      }
     } else if (!rooms.has(roomId)) {
       if (typeof ack === 'function') {
         ack({ ok: false, error: 'Room does not exist' });
@@ -652,6 +869,33 @@ io.on('connection', (socket) => {
       room.hostUsername = privateRoomRecord.hostDisplayName || privateRoomRecord.hostName || room.hostUsername;
       if (joiningHostId && joiningHostId === privateRoomRecord.hostId) {
         room.hostUsername = username;
+        room.hostSocketId = socket.id;
+      }
+
+      const privateRooms = readPrivateRooms();
+      const persistedRoom = privateRooms.find((item) => item.id === privateRoomRecord.id);
+      const activeMeeting = persistedRoom ? getOpenMeeting(persistedRoom) : null;
+
+      if (persistedRoom && activeMeeting) {
+        const now = new Date().toISOString();
+        const existingParticipant = activeMeeting.participants.find(
+          (participant) => usernameKey(participant.username) === usernameKey(username),
+        );
+
+        if (existingParticipant) {
+          existingParticipant.lastJoinedAt = now;
+          existingParticipant.joinCount = Number(existingParticipant.joinCount || 0) + 1;
+        } else {
+          activeMeeting.participants.push({
+            username,
+            firstJoinedAt: now,
+            lastJoinedAt: now,
+            joinCount: 1,
+          });
+        }
+
+        persistedRoom.updatedAt = now;
+        writePrivateRooms(privateRooms);
       }
     }
     const normalizedUsernameKey = usernameKey(username);

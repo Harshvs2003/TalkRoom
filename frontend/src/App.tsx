@@ -38,13 +38,30 @@ type HostProfile = {
   createdAt: string;
 };
 
-type PrivateRoom = {
+type MeetingSummary = {
   id: string;
   name: string;
+  status: 'open' | 'closed';
+  startedAt: string;
+  closedAt: string | null;
+  participantsCount: number;
+  participants?: Array<{
+    username: string;
+    firstJoinedAt: string;
+    lastJoinedAt: string;
+    joinCount: number;
+  }>;
+};
+
+type PrivateRoom = {
+  id: string;
+  workspaceName: string;
   roomCode: string;
   hostDisplayName: string;
   createdAt: string;
   updatedAt: string;
+  meetings: MeetingSummary[];
+  currentMeeting: MeetingSummary | null;
 };
 
 type DocInfo = {
@@ -57,6 +74,7 @@ type DocInfo = {
 type RoomState = {
   hostUsername: string;
   roomType?: 'temporary' | 'private';
+  currentMeetingName?: string | null;
   viewMode: ViewMode;
   docs: DocInfo[];
 };
@@ -163,6 +181,8 @@ function App() {
   const [privateRoomsLoading, setPrivateRoomsLoading] = useState(false);
   const [privateRoomNameInput, setPrivateRoomNameInput] = useState('');
   const [privateRoomPasscodeInput, setPrivateRoomPasscodeInput] = useState('');
+  const [newMeetingRoomId, setNewMeetingRoomId] = useState('');
+  const [newMeetingNameInput, setNewMeetingNameInput] = useState('');
 
   useEffect(() => {
     roomIdRef.current = joinedRoomId;
@@ -907,7 +927,7 @@ function App() {
       const data = await hostApiRequest('/api/private-rooms', {
         method: 'POST',
         body: JSON.stringify({
-          name: privateRoomNameInput.trim(),
+          meetingName: privateRoomNameInput.trim(),
           joinPasscode: privateRoomPasscodeInput,
           hostDisplayName: username.trim() || hostProfile?.name || 'Host',
         }),
@@ -933,6 +953,74 @@ function App() {
       setHostAuthBusy(false);
     }
   }, [hostApiRequest, hostProfile?.name, privateRoomNameInput, privateRoomPasscodeInput, username]);
+
+  const handleStartNewMeeting = useCallback(
+    async (privateRoomId: string) => {
+      const meetingName = newMeetingNameInput.trim();
+
+      if (!meetingName) {
+        setHostAuthMessage('Meeting name is required');
+        return;
+      }
+
+      setHostAuthBusy(true);
+      setHostAuthMessage('');
+
+      try {
+        const data = await hostApiRequest(`/api/private-rooms/${privateRoomId}/meetings`, {
+          method: 'POST',
+          body: JSON.stringify({ meetingName }),
+        });
+
+        const updated = data?.privateRoom as PrivateRoom | undefined;
+
+        if (updated) {
+          setPrivateRooms((prev) =>
+            prev.map((room) => (room.id === updated.id ? updated : room)),
+          );
+        }
+
+        setHostAuthMessage(`New meeting started: ${meetingName}`);
+        setNewMeetingRoomId('');
+        setNewMeetingNameInput('');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Could not start meeting';
+        setHostAuthMessage(message);
+      } finally {
+        setHostAuthBusy(false);
+      }
+    },
+    [hostApiRequest, newMeetingNameInput],
+  );
+
+  const handleCloseCurrentMeeting = useCallback(
+    async (privateRoomId: string) => {
+      setHostAuthBusy(true);
+      setHostAuthMessage('');
+
+      try {
+        const data = await hostApiRequest(`/api/private-rooms/${privateRoomId}/close-meeting`, {
+          method: 'POST',
+        });
+
+        const updated = data?.privateRoom as PrivateRoom | undefined;
+
+        if (updated) {
+          setPrivateRooms((prev) =>
+            prev.map((room) => (room.id === updated.id ? updated : room)),
+          );
+        }
+
+        setHostAuthMessage('Meeting closed successfully.');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Could not close meeting';
+        setHostAuthMessage(message);
+      } finally {
+        setHostAuthBusy(false);
+      }
+    },
+    [hostApiRequest],
+  );
 
   const handleRemoveParticipant = useCallback(
     (targetUsername: string) => {
@@ -1110,7 +1198,7 @@ function App() {
                     type="text"
                     value={privateRoomNameInput}
                     onChange={(event) => setPrivateRoomNameInput(event.target.value)}
-                    placeholder="Private room name"
+                    placeholder="First meeting name (e.g. Daily Standup)"
                     className="mb-2 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
                   />
                   <input
@@ -1148,19 +1236,148 @@ function App() {
                   ) : (
                     <ul className="space-y-2">
                       {privateRooms.map((room) => (
-                        <li key={room.id} className="rounded-lg border border-slate-200 bg-slate-50 p-2">
-                          <p className="font-semibold text-slate-700">{room.name}</p>
+                        <li key={room.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                          <div className="mb-1 flex items-center justify-between gap-2">
+                            <p className="font-semibold text-slate-700">{room.workspaceName}</p>
+                            <span className={room.currentMeeting ? 'rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700' : 'rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-600'}>
+                              {room.currentMeeting ? 'Open' : 'Closed'}
+                            </span>
+                          </div>
                           <p className="text-xs text-slate-500">Code: {room.roomCode}</p>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setJoinRoomInput(room.roomCode);
-                              setAppScreen('home');
-                            }}
-                            className="mt-1 rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
-                          >
-                            Use code in Join
-                          </button>
+                          <p className="text-xs text-slate-500">
+                            Current: {room.currentMeeting ? room.currentMeeting.name : 'No active meeting'}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            Participants: {room.currentMeeting ? room.currentMeeting.participantsCount : 0}
+                          </p>
+
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setJoinRoomInput(room.roomCode);
+                                setAppScreen('home');
+                              }}
+                              className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                            >
+                              Use code in Join
+                            </button>
+                            {room.currentMeeting ? (
+                              <button
+                                type="button"
+                                onClick={() => handleCloseCurrentMeeting(room.id)}
+                                disabled={hostAuthBusy}
+                                className="rounded-md border border-rose-300 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                Close Meeting
+                              </button>
+                            ) : null}
+                            {!room.currentMeeting ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setNewMeetingRoomId(room.id);
+                                  setNewMeetingNameInput('');
+                                }}
+                                className="rounded-md border border-brand-400 px-2 py-1 text-xs font-semibold text-brand-700 hover:bg-brand-50"
+                              >
+                                Start New Meeting
+                              </button>
+                            ) : null}
+                          </div>
+
+                          {newMeetingRoomId === room.id ? (
+                            <div className="mt-2 rounded-md border border-slate-200 bg-white p-2">
+                              <input
+                                type="text"
+                                value={newMeetingNameInput}
+                                onChange={(event) => setNewMeetingNameInput(event.target.value)}
+                                placeholder="Meeting name"
+                                className="mb-2 h-9 w-full rounded-md border border-slate-300 px-2 text-xs outline-none ring-brand-500 transition focus:ring-2"
+                              />
+                              <div className="flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartNewMeeting(room.id)}
+                                  className="rounded-md bg-brand-500 px-2 py-1 text-xs font-semibold text-white hover:bg-brand-600"
+                                >
+                                  Create
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setNewMeetingRoomId('');
+                                    setNewMeetingNameInput('');
+                                  }}
+                                  className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
+
+                          <div className="mt-3 rounded-md border border-slate-200 bg-white p-2">
+                            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                              Meeting History
+                            </p>
+                            {room.meetings.length === 0 ? (
+                              <p className="text-xs text-slate-500">No meetings yet.</p>
+                            ) : (
+                              <ul className="space-y-2">
+                                {room.meetings
+                                  .slice()
+                                  .sort(
+                                    (a, b) =>
+                                      new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
+                                  )
+                                  .map((meeting) => (
+                                    <li key={meeting.id} className="rounded-md border border-slate-200 p-2">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <p className="text-xs font-semibold text-slate-700">{meeting.name}</p>
+                                        <span
+                                          className={
+                                            meeting.status === 'open'
+                                              ? 'rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700'
+                                              : 'rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-600'
+                                          }
+                                        >
+                                          {meeting.status === 'open' ? 'Open' : 'Closed'}
+                                        </span>
+                                      </div>
+                                      <p className="mt-1 text-[11px] text-slate-500">
+                                        Started: {new Date(meeting.startedAt).toLocaleString()}
+                                      </p>
+                                      <p className="text-[11px] text-slate-500">
+                                        Closed:{' '}
+                                        {meeting.closedAt
+                                          ? new Date(meeting.closedAt).toLocaleString()
+                                          : 'Still open'}
+                                      </p>
+                                      <p className="text-[11px] text-slate-500">
+                                        Total participants: {meeting.participantsCount}
+                                      </p>
+                                      {meeting.participants && meeting.participants.length > 0 ? (
+                                        <ul className="mt-1 space-y-1">
+                                          {meeting.participants.map((participant) => (
+                                            <li
+                                              key={`${meeting.id}-${participant.username}`}
+                                              className="rounded bg-slate-50 px-2 py-1 text-[11px] text-slate-600"
+                                            >
+                                              {participant.username} • joins {participant.joinCount}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      ) : (
+                                        <p className="mt-1 text-[11px] text-slate-500">
+                                          No participants recorded.
+                                        </p>
+                                      )}
+                                    </li>
+                                  ))}
+                              </ul>
+                            )}
+                          </div>
                         </li>
                       ))}
                     </ul>
@@ -1286,6 +1503,9 @@ function App() {
                 </p>
                 <p>
                   Host: <span className="font-semibold">{roomState?.hostUsername}</span>
+                </p>
+                <p>
+                  Meeting: <span className="font-semibold">{roomState?.currentMeetingName || 'Live session'}</span>
                 </p>
                 <p>
                   Users: <span className="font-semibold">{users.length}</span>
