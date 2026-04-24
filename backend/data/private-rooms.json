@@ -72,7 +72,7 @@
     "roomCode": "A3MP4EW4YU",
     "joinPasscodeHash": "$2b$10$vculO1xtHU9hYI6sUY7HZuGMgifUuJfbVoQZ/Ke0cqxedIg8TZPCi",
     "createdAt": "2026-04-24T17:34:21.762Z",
-    "updatedAt": "2026-04-24T20:47:31.300Z",
+    "updatedAt": "2026-04-24T21:09:00.679Z",
     "meetings": [
       {
         "id": "0ed2276f-988d-4983-8a96-e6cd096ba73f",
@@ -140,9 +140,9 @@
       {
         "id": "51e6dd40-5330-4df0-9997-a66bc971b8b0",
         "name": "start-35",
-        "status": "open",
+        "status": "closed",
         "startedAt": "2026-04-24T20:47:10.087Z",
-        "closedAt": null,
+        "closedAt": "2026-04-24T21:08:26.010Z",
         "participants": [
           {
             "username": "Cereby",
@@ -154,6 +154,153 @@
             "username": "Serius",
             "firstJoinedAt": "2026-04-24T20:47:31.300Z",
             "lastJoinedAt": "2026-04-24T20:47:31.300Z",
+            "joinCount": 1
+          }
+        ]
+      },
+      {
+        "id": "df1454f9-1555-45e7-8e2f-1ca7461f6e16",
+        "name": "start-50d",
+        "status": "open",
+        "startedAt": "2026-04-24T21:08:40.338Z",
+        "closedAt": null,
+        "participants": [
+          {
+            "username": "Cereby",
+            "firstJoinedAt": "2026-04-24T21:08:52.643Z",
+            "lastJoinedAt": "2026-04-24T21:08:52.643Z",
+            "joinCount": 1
+          },
+          {
+            "username": "Serius",
+            "firstJoinedAt": "2026-04-24T21:09:00.679Z",
+            "lastJoinedAt": "2026-04-24T21:09:00.679Z",
+            "joinCount": 1
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "f4687e96-5be4-41ee-a2e0-8a04dbfd2f5e",
+    "hostId": "c211c866-f883-451a-ac35-7663f4601ff3",
+    "hostName": "Host53a04314",
+    "hostDisplayName": "Host53a04314",
+    "workspaceName": "Host53a04314 Workspace",
+    "roomCode": "KMRVBUQWYD",
+    "joinPasscodeHash": "$2b$10$eJ/Qj/XRCszbR8Ic6CbuFOcfOYOYrljJ9p72mrY5.77BoR.W5v/HC",
+    "createdAt": "2026-04-24T20:56:04.709Z",
+    "updatedAt": "2026-04-24T20:56:04.709Z",
+    "meetings": [
+      {
+        "id": "fc9a17ef-ef9b-427b-af84-44e3a1b1e2c1",
+        "name": "Debug Meeting",
+        "status": "open",
+        "startedAt": "2026-04-24T20:56:04.709Z",
+        "closedAt": null,
+        "participants": []
+      }
+    ]
+  },
+  {
+    "id": "3ee1622f-35af-4330-b1f4-f2b58e2163b5",
+    "hostId": "60b6f46f-400f-4c8d-adda-5c7813690899",
+    "hostName": "Host69e15623",
+    "hostDisplayName": "Host69e15623",
+    "workspaceName": "Host69e15623 Workspace",
+    "roomCode": "4E6HE89A13",
+    "joinPasscodeHash": "$2b$10$IHPgYR3KzP5QRWzsWuvBmOBGYdMibub/rPZCSbSUzULg48zvPIZF.",
+    "createdAt": "2026-04-24T20:56:25.471Z",
+    "updatedAt": "2026-04-24T20:56:25.471Z",
+    "meetings": [
+      {
+        "id": "c6bc4d71-cd35-4dba-9d2f-12204de635e6",
+        "name": "Debug Meeting",
+        "status": "open",
+        "startedAt": "2026-04-24T20:56:25.471Z",
+        "closedAt": null,
+        "participants": []
+      }
+    ]
+  },
+  {
+    "id": "5354e9c5-751c-40a7-bb52-e074509ad947",
+    "hostId": "25f94487-b350-411d-a15f-d5e316d5d9f0",
+    "hostName": "Probe368955cb",
+    "hostDisplayName": "Probe368955cb",
+    "workspaceName": "Probe368955cb Workspace",
+    "roomCode": "LXGUEVW3MU",
+    "joinPasscodeHash": "$2b$10$SXoEsEnf4XFhwmAgLjDbruX4RZDb.pu.2WMdSJF90336j/SXb8n46",
+    "createdAt": "2026-04-24T21:03:34.154Z",
+    "updatedAt": "2026-04-24T21:03:35.315Z",
+    "meetings": [
+      {
+        "id": "6370a373-2a65-40bd-93ed-d773c358f7f5",
+        "name": "Probe",
+        "status": "open",
+        "startedAt": "2026-04-24T21:03:34.154Z",
+        "closedAt": null,
+        "participants": [
+          {
+            "username": "Alice",
+            "firstJoinedAt": "2026-04-24T21:03:35.315Z",
+            "lastJoinedAt": "2026-04-24T21:03:35.315Z",
+            "joinCount": 1
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "b23c85a4-a196-414c-9e07-8d1ced40935c",
+    "hostId": "6859ee8d-9c20-436d-8775-5d78614a0d31",
+    "hostName": "Probef9af6f8b",
+    "hostDisplayName": "Probef9af6f8b",
+    "workspaceName": "Probef9af6f8b Workspace",
+    "roomCode": "LJIJD2CYVM",
+    "joinPasscodeHash": "$2b$10$jlRVzWm1CFE9Kz14DhHxze593jrjgi/Y8i7lKuCZpTZeW2DNfzJkm",
+    "createdAt": "2026-04-24T21:04:01.335Z",
+    "updatedAt": "2026-04-24T21:04:01.428Z",
+    "meetings": [
+      {
+        "id": "494d6dd0-ffef-46ec-a277-3f7ae61d4364",
+        "name": "Probe2",
+        "status": "open",
+        "startedAt": "2026-04-24T21:04:01.335Z",
+        "closedAt": null,
+        "participants": [
+          {
+            "username": "Alice",
+            "firstJoinedAt": "2026-04-24T21:04:01.428Z",
+            "lastJoinedAt": "2026-04-24T21:04:01.428Z",
+            "joinCount": 1
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "0ade4456-3561-414a-bb5f-eb9dafc1ec7e",
+    "hostId": "f1484ed3-06bc-4a02-bd93-066ffdfa81f4",
+    "hostName": "Probefd6b3f80",
+    "hostDisplayName": "Probefd6b3f80",
+    "workspaceName": "Probefd6b3f80 Workspace",
+    "roomCode": "C7AIZ54ULX",
+    "joinPasscodeHash": "$2b$10$VhUHVVfzcVFb8aMIIF/8bu5r4EdfbKTPhb9hifIItjdV4mV1dtCjK",
+    "createdAt": "2026-04-24T21:06:32.804Z",
+    "updatedAt": "2026-04-24T21:06:33.950Z",
+    "meetings": [
+      {
+        "id": "f5cf8cd3-eb1b-4ad3-9dc7-687cd54e5f60",
+        "name": "Probe2",
+        "status": "open",
+        "startedAt": "2026-04-24T21:06:32.804Z",
+        "closedAt": null,
+        "participants": [
+          {
+            "username": "Bob",
+            "firstJoinedAt": "2026-04-24T21:06:33.950Z",
+            "lastJoinedAt": "2026-04-24T21:06:33.950Z",
             "joinCount": 1
           }
         ]
