@@ -73,9 +73,11 @@ type DocInfo = {
 
 type RoomState = {
   hostUsername: string;
+  hostOwnerId?: string | null;
   roomType?: 'temporary' | 'private';
   currentMeetingName?: string | null;
   viewMode: ViewMode;
+  users?: string[];
   docs: DocInfo[];
 };
 
@@ -460,6 +462,9 @@ function App() {
     const handleRoomState = (nextRoomState: RoomState) => {
       ensureDocModels(nextRoomState);
       setRoomState(nextRoomState);
+      if (Array.isArray(nextRoomState.users)) {
+        setUsers(nextRoomState.users);
+      }
     };
 
     const handleYjsUpdate = (payload: RealtimePayload) => {
@@ -565,8 +570,15 @@ function App() {
   );
 
   const isHost = useMemo(
-    () => Boolean(roomState && roomState.hostUsername === username.trim()),
-    [roomState, username],
+    () =>
+      Boolean(
+        roomState &&
+          ((roomState.roomType === 'private' &&
+            hostProfile?.id &&
+            roomState.hostOwnerId === hostProfile.id) ||
+            roomState.hostUsername === username.trim()),
+      ),
+    [hostProfile?.id, roomState, username],
   );
 
   const sharedDoc = useMemo(
@@ -736,7 +748,13 @@ function App() {
           setJoinedRoomId(ack.roomId);
           setJoinRoomInput(ack.roomId);
           setJoinRoomPasscodeInput(joinPasscode);
-          setUsers(Array.isArray(ack.users) ? ack.users : []);
+          setUsers(
+            Array.isArray(ack.roomState.users)
+              ? ack.roomState.users
+              : Array.isArray(ack.users)
+                ? ack.users
+                : [],
+          );
           setAppScreen('room');
           sessionStorage.setItem(LAST_ROOM_KEY, ack.roomId);
           sessionStorage.setItem(LAST_ROOM_PASSCODE_KEY, joinPasscode || '');

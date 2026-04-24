@@ -534,9 +534,11 @@ const toPublicDoc = (doc) => ({
 
 const toPublicRoomState = (room) => ({
   hostUsername: room.hostUsername,
+  hostOwnerId: room.hostOwnerId || null,
   roomType: room.roomType || 'temporary',
   currentMeetingName: room.currentMeetingName || null,
   viewMode: room.viewMode,
+  users: room.users.map((user) => user.username),
   docs: room.docs.map(toPublicDoc),
 });
 
@@ -866,10 +868,11 @@ io.on('connection', (socket) => {
     clearRoomCleanupTimer(roomId);
     if (room.roomType === 'private' && privateRoomRecord) {
       room.hostOwnerId = privateRoomRecord.hostId;
-      room.hostUsername = privateRoomRecord.hostDisplayName || privateRoomRecord.hostName || room.hostUsername;
       if (joiningHostId && joiningHostId === privateRoomRecord.hostId) {
         room.hostUsername = username;
         room.hostSocketId = socket.id;
+      } else if (!room.hostUsername) {
+        room.hostUsername = privateRoomRecord.hostDisplayName || privateRoomRecord.hostName || 'Host';
       }
 
       const privateRooms = readPrivateRooms();
