@@ -60,9 +60,47 @@ type PrivateRoom = {
   hostDisplayName: string;
   createdAt: string;
   updatedAt: string;
+  bannedParticipants?: string[];
+  participantsStatus?: ParticipantStatus[];
+  sessionHistory?: SessionSnapshot[];
   meetings: MeetingSummary[];
   currentMeeting: MeetingSummary | null;
 };
+
+type ParticipantStatus = {
+  username: string;
+  key: string;
+  totalJoinCount: number;
+  meetingsJoined: number;
+  firstJoinedAt: string | null;
+  lastJoinedAt: string | null;
+  banned: boolean;
+};
+
+type SessionSnapshot = {
+  id: string;
+  privateRoomId: string;
+  roomCode: string;
+  meetingId: string;
+  meetingName: string;
+  capturedAt: string;
+  activeUsers: string[];
+  docs: Array<{
+    docId: string;
+    name: string;
+    type: DocType;
+    ownerUsername: string | null;
+    text: string;
+  }>;
+};
+
+type HostDashboardTab =
+  | 'create_private_room'
+  | 'current_room_joining'
+  | 'meeting_history'
+  | 'participants_status'
+  | 'session_history'
+  | 'exports';
 
 type DocInfo = {
   id: string;
@@ -185,6 +223,12 @@ function App() {
   const [privateRoomPasscodeInput, setPrivateRoomPasscodeInput] = useState('');
   const [newMeetingRoomId, setNewMeetingRoomId] = useState('');
   const [newMeetingNameInput, setNewMeetingNameInput] = useState('');
+  const [hostDashboardTab, setHostDashboardTab] = useState<HostDashboardTab>('create_private_room');
+  const [selectedPrivateRoomId, setSelectedPrivateRoomId] = useState('');
+  const [participantsStatus, setParticipantsStatus] = useState<ParticipantStatus[]>([]);
+  const [participantsStatusLoading, setParticipantsStatusLoading] = useState(false);
+  const [sessionHistory, setSessionHistory] = useState<SessionSnapshot[]>([]);
+  const [sessionHistoryLoading, setSessionHistoryLoading] = useState(false);
 
   useEffect(() => {
     roomIdRef.current = joinedRoomId;
@@ -659,6 +703,34 @@ function App() {
     fetchPrivateRooms();
   }, [fetchPrivateRooms, hostProfile?.id]);
 
+  useEffect(() => {
+    if (!privateRooms.length) {
+      setSelectedPrivateRoomId('');
+      return;
+    }
+
+    if (!selectedPrivateRoomId || !privateRooms.some((room) => room.id === selectedPrivateRoomId)) {
+      setSelectedPrivateRoomId(privateRooms[0].id);
+    }
+  }, [privateRooms, selectedPrivateRoomId]);
+
+  const selectedPrivateRoom = useMemo(
+    () => privateRooms.find((room) => room.id === selectedPrivateRoomId) || null,
+    [privateRooms, selectedPrivateRoomId],
+  );
+
+  const hostDashboardTabs = useMemo(
+    () => [
+      { id: 'create_private_room', label: 'Create Private Room' },
+      { id: 'current_room_joining', label: 'Current Room Joining' },
+      { id: 'meeting_history', label: 'Meeting History' },
+      { id: 'participants_status', label: 'Participants Status' },
+      { id: 'session_history', label: 'Session History' },
+      { id: 'exports', label: 'Exports' },
+    ] as Array<{ id: HostDashboardTab; label: string }>,
+    [],
+  );
+
   const validateUsername = useCallback(() => {
     if (!username.trim()) {
       setErrorMessage('Please enter a username first.');
@@ -928,6 +1000,10 @@ function App() {
     setHostToken('');
     setHostProfile(null);
     setPrivateRooms([]);
+    setSelectedPrivateRoomId('');
+    setParticipantsStatus([]);
+    setSessionHistory([]);
+    setHostDashboardTab('create_private_room');
     setHostPasswordInput('');
     setHostAuthMessage('Logged out.');
   }, [hostApiRequest]);
@@ -1040,6 +1116,141 @@ function App() {
     [hostApiRequest],
   );
 
+  const fetchParticipantsStatus = useCallback(
+    async (privateRoomId: string) => {
+      if (!privateRoomId) {
+        setParticipantsStatus([]);
+        return;
+      }
+
+      setParticipantsStatusLoading(true);
+
+      try {
+        const data = await hostApiRequest(`/api/private-rooms/${privateRoomId}/participants`);
+        setParticipantsStatus(Array.isArray(data.participants) ? data.participants : []);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Could not load participants';
+        setHostAuthMessage(message);
+        setParticipantsStatus([]);
+      } finally {
+        setParticipantsStatusLoading(false);
+      }
+    },
+    [hostApiRequest],
+  );
+
+  const fetchSessionHistory = useCallback(
+    async (privateRoomId: string) => {
+      if (!privateRoomId) {
+        setSessionHistory([]);
+        return;
+      }
+
+      setSessionHistoryLoading(true);
+
+      try {
+        const data = await hostApiRequest(`/api/private-rooms/${privateRoomId}/session-history`);
+        setSessionHistory(Array.isArray(data.sessionHistory) ? data.sessionHistory : []);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Could not load session history';
+        setHostAuthMessage(message);
+        setSessionHistory([]);
+      } finally {
+        setSessionHistoryLoading(false);
+      }
+    },
+    [hostApiRequest],
+  );
+
+  const handleBanToggleParticipant = useCallback(
+    async (participant: ParticipantStatus, action: 'ban' | 'unban') => {
+      if (!selectedPrivateRoomId) {
+        return;
+      }
+
+      setHostAuthBusy(true);
+      setHostAuthMessage('');
+
+      try {
+        const endpoint =
+          action === 'ban'
+            ? `/api/private-rooms/${selectedPrivateRoomId}/participants/ban`
+            : `/api/private-rooms/${selectedPrivateRoomId}/participants/unban`;
+
+        const data = await hostApiRequest(endpoint, {
+          method: 'POST',
+          body: JSON.stringify({ username: participant.username }),
+        });
+
+        const updated = data?.privateRoom as PrivateRoom | undefined;
+
+        if (updated) {
+          setPrivateRooms((prev) => prev.map((room) => (room.id === updated.id ? updated : room)));
+        }
+
+        setHostAuthMessage(
+          action === 'ban'
+            ? `${participant.username} banned from this private room code.`
+            : `${participant.username} unbanned.`,
+        );
+
+        await fetchParticipantsStatus(selectedPrivateRoomId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Could not update participant status';
+        setHostAuthMessage(message);
+      } finally {
+        setHostAuthBusy(false);
+      }
+    },
+    [fetchParticipantsStatus, hostApiRequest, selectedPrivateRoomId],
+  );
+
+  const handleExportData = useCallback(
+    async (format: 'json' | 'csv' | 'pdf') => {
+      if (!selectedPrivateRoomId || !selectedPrivateRoom) {
+        setHostAuthMessage('Choose a private room first.');
+        return;
+      }
+
+      if (format === 'pdf') {
+        setHostAuthMessage('PDF export is queued next. JSON and CSV exports are ready now.');
+        return;
+      }
+
+      try {
+        const response = await fetch(
+          `${BACKEND_URL}/api/private-rooms/${selectedPrivateRoomId}/exports?format=${format}`,
+          {
+            headers: {
+              ...(hostToken ? { Authorization: `Bearer ${hostToken}` } : {}),
+            },
+          },
+        );
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data?.error || 'Export failed');
+        }
+
+        const blob = await response.blob();
+        const fileName = `${selectedPrivateRoom.roomCode}-export.${format}`;
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+        setHostAuthMessage(`${format.toUpperCase()} export downloaded.`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Could not export data';
+        setHostAuthMessage(message);
+      }
+    },
+    [hostToken, selectedPrivateRoom, selectedPrivateRoomId],
+  );
+
   const handleRemoveParticipant = useCallback(
     (targetUsername: string) => {
       const socket = socketRef.current;
@@ -1078,6 +1289,28 @@ function App() {
     setStatusMessage('');
     setErrorMessage('');
   }, [destroyAllDocs]);
+
+  useEffect(() => {
+    if (!hostProfile || !selectedPrivateRoomId) {
+      setParticipantsStatus([]);
+      setSessionHistory([]);
+      return;
+    }
+
+    if (hostDashboardTab === 'participants_status') {
+      fetchParticipantsStatus(selectedPrivateRoomId);
+    }
+
+    if (hostDashboardTab === 'session_history') {
+      fetchSessionHistory(selectedPrivateRoomId);
+    }
+  }, [
+    fetchParticipantsStatus,
+    fetchSessionHistory,
+    hostDashboardTab,
+    hostProfile,
+    selectedPrivateRoomId,
+  ]);
 
   useEffect(() => () => {
     if (restoreRetryTimeoutRef.current) {
@@ -1189,7 +1422,7 @@ function App() {
         ) : null}
 
         {appScreen === 'hostAuth' ? (
-          <div className="mx-auto flex w-full max-w-xl flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
+          <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-xl font-semibold text-slate-900">Host Portal</h2>
               <button
@@ -1202,110 +1435,134 @@ function App() {
             </div>
 
             {hostProfile ? (
-              <div className="space-y-3 text-sm">
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
-                  <p>
-                    Logged in as <span className="font-semibold">{hostProfile.name}</span>
-                  </p>
-                  <p className="text-slate-600">{hostProfile.email}</p>
-                </div>
-
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                  <p className="mb-2 text-sm font-semibold text-slate-700">Create Permanent Private Room</p>
-                  <input
-                    type="text"
-                    value={privateRoomNameInput}
-                    onChange={(event) => setPrivateRoomNameInput(event.target.value)}
-                    placeholder="First meeting name (e.g. Daily Standup)"
-                    className="mb-2 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
-                  />
-                  <input
-                    type="password"
-                    value={privateRoomPasscodeInput}
-                    onChange={(event) => setPrivateRoomPasscodeInput(event.target.value)}
-                    placeholder="Participant join passcode"
-                    className="mb-2 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
-                  />
+              <div className="grid gap-4 lg:grid-cols-[250px_1fr]">
+                <aside className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-600">TalkRoom</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-800">{hostProfile.name}</p>
+                  <p className="mb-4 text-xs text-slate-500">{hostProfile.email}</p>
+                  <nav className="space-y-1">
+                    {hostDashboardTabs.map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setHostDashboardTab(tab.id)}
+                        className={hostDashboardTab === tab.id ? 'w-full rounded-lg bg-brand-500 px-3 py-2 text-left text-sm font-semibold text-white' : 'w-full rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-700 hover:bg-slate-200'}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </nav>
                   <button
                     type="button"
-                    onClick={handleCreatePrivateRoom}
-                    disabled={hostAuthBusy}
-                    className="h-10 w-full rounded-lg bg-brand-500 text-sm font-semibold text-white hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={handleHostLogout}
+                    className="mt-4 h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100"
                   >
-                    {hostAuthBusy ? 'Please wait...' : 'Create 10-char Private Room'}
+                    Logout Host
                   </button>
-                </div>
+                </aside>
 
-                <div className="rounded-xl border border-slate-200 bg-white p-4">
-                  <div className="mb-2 flex items-center justify-between">
-                    <p className="text-sm font-semibold text-slate-700">Your Private Rooms</p>
-                    <button
-                      type="button"
-                      onClick={fetchPrivateRooms}
-                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                <div className="space-y-4 text-sm">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Private Room</label>
+                      <button
+                        type="button"
+                        onClick={fetchPrivateRooms}
+                        className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                      >
+                        Refresh
+                      </button>
+                      {privateRoomsLoading ? (
+                        <span className="text-xs text-slate-500">Loading...</span>
+                      ) : null}
+                    </div>
+                    <select
+                      value={selectedPrivateRoomId}
+                      onChange={(event) => setSelectedPrivateRoomId(event.target.value)}
+                      className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm"
                     >
-                      Refresh
-                    </button>
+                      {privateRooms.length === 0 ? (
+                        <option value="">No private rooms yet</option>
+                      ) : (
+                        privateRooms.map((room) => (
+                          <option key={room.id} value={room.id}>
+                            {room.workspaceName} ({room.roomCode})
+                          </option>
+                        ))
+                      )}
+                    </select>
                   </div>
-                  {privateRoomsLoading ? (
-                    <p className="text-xs text-slate-500">Loading rooms...</p>
-                  ) : privateRooms.length === 0 ? (
-                    <p className="text-xs text-slate-500">No private rooms yet.</p>
-                  ) : (
-                    <ul className="space-y-2">
-                      {privateRooms.map((room) => (
-                        <li key={room.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                          <div className="mb-1 flex items-center justify-between gap-2">
-                            <p className="font-semibold text-slate-700">{room.workspaceName}</p>
-                            <span className={room.currentMeeting ? 'rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700' : 'rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-600'}>
-                              {room.currentMeeting ? 'Open' : 'Closed'}
-                            </span>
-                          </div>
-                          <p className="text-xs text-slate-500">Code: {room.roomCode}</p>
-                          <p className="text-xs text-slate-500">
-                            Current: {room.currentMeeting ? room.currentMeeting.name : 'No active meeting'}
-                          </p>
-                          <p className="text-xs text-slate-500">
-                            Participants: {room.currentMeeting ? room.currentMeeting.participantsCount : 0}
-                          </p>
 
+                  {hostDashboardTab === 'create_private_room' ? (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <p className="mb-2 text-sm font-semibold text-slate-700">Create Private Room (Permanent)</p>
+                      <input
+                        type="text"
+                        value={privateRoomNameInput}
+                        onChange={(event) => setPrivateRoomNameInput(event.target.value)}
+                        placeholder="First meeting name"
+                        className="mb-2 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
+                      />
+                      <input
+                        type="password"
+                        value={privateRoomPasscodeInput}
+                        onChange={(event) => setPrivateRoomPasscodeInput(event.target.value)}
+                        placeholder="Participant join passcode"
+                        className="mb-2 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleCreatePrivateRoom}
+                        disabled={hostAuthBusy}
+                        className="h-10 w-full rounded-lg bg-brand-500 text-sm font-semibold text-white hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {hostAuthBusy ? 'Please wait...' : 'Create 10-char Private Room'}
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {hostDashboardTab === 'current_room_joining' ? (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <p className="mb-2 text-sm font-semibold text-slate-700">Current Room Joining</p>
+                      {selectedPrivateRoom ? (
+                        <>
+                          <p className="text-xs text-slate-500">Code: {selectedPrivateRoom.roomCode}</p>
+                          <p className="text-xs text-slate-500">Current: {selectedPrivateRoom.currentMeeting?.name || 'No active meeting'}</p>
                           <div className="mt-2 flex flex-wrap gap-2">
                             <button
                               type="button"
                               onClick={() => {
-                                setJoinRoomInput(room.roomCode);
+                                setJoinRoomInput(selectedPrivateRoom.roomCode);
                                 setAppScreen('home');
                               }}
                               className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
                             >
-                              Use code in Join
+                              Use Code In Join
                             </button>
-                            {room.currentMeeting ? (
+                            {selectedPrivateRoom.currentMeeting ? (
                               <button
                                 type="button"
-                                onClick={() => handleCloseCurrentMeeting(room.id)}
+                                onClick={() => handleCloseCurrentMeeting(selectedPrivateRoom.id)}
                                 disabled={hostAuthBusy}
                                 className="rounded-md border border-rose-300 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
                               >
                                 Close Meeting
                               </button>
-                            ) : null}
-                            {!room.currentMeeting ? (
+                            ) : (
                               <button
                                 type="button"
                                 onClick={() => {
-                                  setNewMeetingRoomId(room.id);
+                                  setNewMeetingRoomId(selectedPrivateRoom.id);
                                   setNewMeetingNameInput('');
                                 }}
                                 className="rounded-md border border-brand-400 px-2 py-1 text-xs font-semibold text-brand-700 hover:bg-brand-50"
                               >
                                 Start New Meeting
                               </button>
-                            ) : null}
+                            )}
                           </div>
-
-                          {newMeetingRoomId === room.id ? (
-                            <div className="mt-2 rounded-md border border-slate-200 bg-white p-2">
+                          {newMeetingRoomId === selectedPrivateRoom.id ? (
+                            <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-2">
                               <input
                                 type="text"
                                 value={newMeetingNameInput}
@@ -1316,7 +1573,7 @@ function App() {
                               <div className="flex gap-2">
                                 <button
                                   type="button"
-                                  onClick={() => handleStartNewMeeting(room.id)}
+                                  onClick={() => handleStartNewMeeting(selectedPrivateRoom.id)}
                                   className="rounded-md bg-brand-500 px-2 py-1 text-xs font-semibold text-white hover:bg-brand-600"
                                 >
                                   Create
@@ -1334,81 +1591,121 @@ function App() {
                               </div>
                             </div>
                           ) : null}
+                        </>
+                      ) : (
+                        <p className="text-xs text-slate-500">Create a private room first.</p>
+                      )}
+                    </div>
+                  ) : null}
 
-                          <div className="mt-3 rounded-md border border-slate-200 bg-white p-2">
-                            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                              Meeting History
-                            </p>
-                            {room.meetings.length === 0 ? (
-                              <p className="text-xs text-slate-500">No meetings yet.</p>
-                            ) : (
-                              <ul className="space-y-2">
-                                {room.meetings
-                                  .slice()
-                                  .sort(
-                                    (a, b) =>
-                                      new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
-                                  )
-                                  .map((meeting) => (
-                                    <li key={meeting.id} className="rounded-md border border-slate-200 p-2">
-                                      <div className="flex items-center justify-between gap-2">
-                                        <p className="text-xs font-semibold text-slate-700">{meeting.name}</p>
-                                        <span
-                                          className={
-                                            meeting.status === 'open'
-                                              ? 'rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700'
-                                              : 'rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-600'
-                                          }
-                                        >
-                                          {meeting.status === 'open' ? 'Open' : 'Closed'}
-                                        </span>
-                                      </div>
-                                      <p className="mt-1 text-[11px] text-slate-500">
-                                        Started: {new Date(meeting.startedAt).toLocaleString()}
-                                      </p>
-                                      <p className="text-[11px] text-slate-500">
-                                        Closed:{' '}
-                                        {meeting.closedAt
-                                          ? new Date(meeting.closedAt).toLocaleString()
-                                          : 'Still open'}
-                                      </p>
-                                      <p className="text-[11px] text-slate-500">
-                                        Total participants: {meeting.participantsCount}
-                                      </p>
-                                      {meeting.participants && meeting.participants.length > 0 ? (
-                                        <ul className="mt-1 space-y-1">
-                                          {meeting.participants.map((participant) => (
-                                            <li
-                                              key={`${meeting.id}-${participant.username}`}
-                                              className="rounded bg-slate-50 px-2 py-1 text-[11px] text-slate-600"
-                                            >
-                                              {participant.username} • joins {participant.joinCount}
-                                            </li>
-                                          ))}
-                                        </ul>
-                                      ) : (
-                                        <p className="mt-1 text-[11px] text-slate-500">
-                                          No participants recorded.
-                                        </p>
-                                      )}
-                                    </li>
-                                  ))}
-                              </ul>
-                            )}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                  {hostDashboardTab === 'meeting_history' ? (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <p className="mb-2 text-sm font-semibold text-slate-700">Meeting History</p>
+                      {!selectedPrivateRoom ? (
+                        <p className="text-xs text-slate-500">Select a private room.</p>
+                      ) : selectedPrivateRoom.meetings.length === 0 ? (
+                        <p className="text-xs text-slate-500">No meetings yet.</p>
+                      ) : (
+                        <ul className="space-y-2">
+                          {selectedPrivateRoom.meetings
+                            .slice()
+                            .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+                            .map((meeting) => (
+                              <li key={meeting.id} className="rounded-md border border-slate-200 p-2">
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="text-xs font-semibold text-slate-700">{meeting.name}</p>
+                                  <span className={meeting.status === 'open' ? 'rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700' : 'rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-600'}>
+                                    {meeting.status === 'open' ? 'Open' : 'Closed'}
+                                  </span>
+                                </div>
+                                <p className="mt-1 text-[11px] text-slate-500">Started: {new Date(meeting.startedAt).toLocaleString()}</p>
+                                <p className="text-[11px] text-slate-500">Closed: {meeting.closedAt ? new Date(meeting.closedAt).toLocaleString() : 'Still open'}</p>
+                                <p className="text-[11px] text-slate-500">Total participants: {meeting.participantsCount}</p>
+                              </li>
+                            ))}
+                        </ul>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {hostDashboardTab === 'participants_status' ? (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <p className="mb-2 text-sm font-semibold text-slate-700">Participants Status</p>
+                      {!selectedPrivateRoom ? (
+                        <p className="text-xs text-slate-500">Select a private room.</p>
+                      ) : participantsStatusLoading ? (
+                        <p className="text-xs text-slate-500">Loading participants...</p>
+                      ) : participantsStatus.length === 0 ? (
+                        <p className="text-xs text-slate-500">No participants data yet.</p>
+                      ) : (
+                        <ul className="space-y-2">
+                          {participantsStatus.map((participant) => (
+                            <li key={participant.key} className="flex items-center justify-between rounded-md border border-slate-200 p-2">
+                              <div>
+                                <p className="text-sm font-semibold text-slate-700">{participant.username}</p>
+                                <p className="text-[11px] text-slate-500">Meetings: {participant.meetingsJoined} | Joins: {participant.totalJoinCount}</p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleBanToggleParticipant(participant, participant.banned ? 'unban' : 'ban')}
+                                disabled={hostAuthBusy}
+                                className={participant.banned ? 'rounded-md border border-emerald-300 px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60' : 'rounded-md border border-rose-300 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60'}
+                              >
+                                {participant.banned ? 'Unban' : 'Ban'}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {hostDashboardTab === 'session_history' ? (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <div className="mb-2 flex items-center justify-between">
+                        <p className="text-sm font-semibold text-slate-700">Session History</p>
+                        {selectedPrivateRoomId ? (
+                          <button
+                            type="button"
+                            onClick={() => fetchSessionHistory(selectedPrivateRoomId)}
+                            className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                          >
+                            Refresh
+                          </button>
+                        ) : null}
+                      </div>
+                      {!selectedPrivateRoom ? (
+                        <p className="text-xs text-slate-500">Select a private room.</p>
+                      ) : sessionHistoryLoading ? (
+                        <p className="text-xs text-slate-500">Loading session snapshots...</p>
+                      ) : sessionHistory.length === 0 ? (
+                        <p className="text-xs text-slate-500">No session snapshots yet. Close a meeting to generate one.</p>
+                      ) : (
+                        <ul className="space-y-2">
+                          {sessionHistory.map((snapshot) => (
+                            <li key={snapshot.id} className="rounded-md border border-slate-200 p-2">
+                              <p className="text-xs font-semibold text-slate-700">{snapshot.meetingName} ({new Date(snapshot.capturedAt).toLocaleString()})</p>
+                              <p className="text-[11px] text-slate-500">Active users at close: {snapshot.activeUsers.join(', ') || 'None'}</p>
+                              <p className="text-[11px] text-slate-500">Docs captured: {snapshot.docs.length}</p>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {hostDashboardTab === 'exports' ? (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <p className="mb-2 text-sm font-semibold text-slate-700">Exports</p>
+                      <p className="mb-3 text-xs text-slate-500">Export meeting, participant and session data for this private room code.</p>
+                      <div className="flex flex-wrap gap-2">
+                        <button type="button" onClick={() => handleExportData('json')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export JSON</button>
+                        <button type="button" onClick={() => handleExportData('csv')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export CSV</button>
+                        <button type="button" onClick={() => handleExportData('pdf')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export PDF</button>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-
-                <button
-                  type="button"
-                  onClick={handleHostLogout}
-                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 font-semibold text-slate-700 hover:bg-slate-100"
-                >
-                  Logout Host
-                </button>
               </div>
             ) : (
               <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">

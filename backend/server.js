@@ -105,6 +105,20 @@ const readPrivateRooms = () => {
         migrated = true;
       }
 
+      const normalizedBannedParticipants = normalizeBannedParticipants(nextRoom.bannedParticipants);
+      if (
+        !Array.isArray(nextRoom.bannedParticipants) ||
+        normalizedBannedParticipants.length !== nextRoom.bannedParticipants.length
+      ) {
+        nextRoom.bannedParticipants = normalizedBannedParticipants;
+        migrated = true;
+      }
+
+      if (!Array.isArray(nextRoom.sessionHistory)) {
+        nextRoom.sessionHistory = [];
+        migrated = true;
+      }
+
       return nextRoom;
     });
 
@@ -143,6 +157,66 @@ const toPublicMeeting = (meeting) => ({
     : [],
 });
 
+const aggregateParticipants = (privateRoomRecord) => {
+  const participantMap = new Map();
+  const bannedLookup = new Set(normalizeBannedParticipants(privateRoomRecord.bannedParticipants));
+
+  (privateRoomRecord.meetings || []).forEach((meeting) => {
+    (meeting.participants || []).forEach((participant) => {
+      const key = usernameKey(participant.username);
+
+      if (!key) {
+        return;
+      }
+
+      const joinCount = Number(participant.joinCount || 0) || 0;
+      const existing = participantMap.get(key);
+
+      if (existing) {
+        existing.totalJoinCount += joinCount;
+        existing.meetingsJoined += 1;
+        if (
+          participant.lastJoinedAt &&
+          (!existing.lastJoinedAt || new Date(participant.lastJoinedAt) > new Date(existing.lastJoinedAt))
+        ) {
+          existing.lastJoinedAt = participant.lastJoinedAt;
+        }
+      } else {
+        participantMap.set(key, {
+          username: participant.username,
+          key,
+          totalJoinCount: joinCount,
+          meetingsJoined: 1,
+          firstJoinedAt: participant.firstJoinedAt || null,
+          lastJoinedAt: participant.lastJoinedAt || null,
+          banned: bannedLookup.has(key),
+        });
+      }
+    });
+  });
+
+  return Array.from(participantMap.values()).sort((a, b) => a.username.localeCompare(b.username));
+};
+
+const toPublicSessionSnapshot = (snapshot) => ({
+  id: snapshot.id,
+  privateRoomId: snapshot.privateRoomId,
+  roomCode: snapshot.roomCode,
+  meetingId: snapshot.meetingId,
+  meetingName: snapshot.meetingName,
+  capturedAt: snapshot.capturedAt,
+  activeUsers: Array.isArray(snapshot.activeUsers) ? snapshot.activeUsers : [],
+  docs: Array.isArray(snapshot.docs)
+    ? snapshot.docs.map((doc) => ({
+        docId: doc.docId,
+        name: doc.name,
+        type: doc.type,
+        ownerUsername: doc.ownerUsername || null,
+        text: String(doc.text || ''),
+      }))
+    : [],
+});
+
 const toPublicPrivateRoom = (privateRoomRecord) => ({
   id: privateRoomRecord.id,
   workspaceName: privateRoomRecord.workspaceName,
@@ -150,6 +224,11 @@ const toPublicPrivateRoom = (privateRoomRecord) => ({
   hostDisplayName: privateRoomRecord.hostDisplayName,
   createdAt: privateRoomRecord.createdAt,
   updatedAt: privateRoomRecord.updatedAt,
+  bannedParticipants: normalizeBannedParticipants(privateRoomRecord.bannedParticipants),
+  participantsStatus: aggregateParticipants(privateRoomRecord),
+  sessionHistory: Array.isArray(privateRoomRecord.sessionHistory)
+    ? privateRoomRecord.sessionHistory.map(toPublicSessionSnapshot)
+    : [],
   meetings: (privateRoomRecord.meetings || []).map(toPublicMeeting),
   currentMeeting: getOpenMeeting(privateRoomRecord)
     ? toPublicMeeting(getOpenMeeting(privateRoomRecord))
@@ -166,6 +245,36 @@ const closeOpenMeeting = (privateRoomRecord) => {
   openMeeting.status = 'closed';
   openMeeting.closedAt = new Date().toISOString();
   return true;
+};
+
+const captureSessionSnapshot = ({ privateRoomRecord, meeting, runtimeRoom }) => {
+  if (!privateRoomRecord || !meeting || !runtimeRoom) {
+    return;
+  }
+
+  const snapshot = {
+    id: crypto.randomUUID(),
+    privateRoomId: privateRoomRecord.id,
+    roomCode: privateRoomRecord.roomCode,
+    meetingId: meeting.id,
+    meetingName: meeting.name,
+    capturedAt: new Date().toISOString(),
+    activeUsers: runtimeRoom.users.map((user) => user.username),
+    docs: runtimeRoom.docs.map((doc) => ({
+      docId: doc.id,
+      name: doc.name,
+      type: doc.type,
+      ownerUsername: doc.ownerUsername || null,
+      text: doc.ydoc.getText('content').toString(),
+    })),
+  };
+
+  if (!Array.isArray(privateRoomRecord.sessionHistory)) {
+    privateRoomRecord.sessionHistory = [];
+  }
+
+  privateRoomRecord.sessionHistory.unshift(snapshot);
+  privateRoomRecord.sessionHistory = privateRoomRecord.sessionHistory.slice(0, 100);
 };
 
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
@@ -367,6 +476,8 @@ app.post('/api/private-rooms', authMiddleware, async (req, res) => {
     joinPasscodeHash,
     createdAt: now,
     updatedAt: now,
+    bannedParticipants: [],
+    sessionHistory: [],
     meetings: [firstMeeting],
   };
 
@@ -442,6 +553,9 @@ app.post('/api/private-rooms/:privateRoomId/close-meeting', authMiddleware, (req
   const privateRoomId = String(req.params.privateRoomId || '').trim();
   const privateRooms = readPrivateRooms();
   const privateRoom = privateRooms.find((room) => room.id === privateRoomId);
+  const runtimeRoomId = privateRoom ? normalizeRoomId(privateRoom.roomCode) : '';
+  const runtimeRoom = runtimeRoomId ? rooms.get(runtimeRoomId) : null;
+  const activeMeetingBeforeClose = privateRoom ? getOpenMeeting(privateRoom) : null;
 
   if (!privateRoom || privateRoom.hostId !== host.id) {
     res.status(404).json({ ok: false, error: 'Private room not found' });
@@ -455,13 +569,15 @@ app.post('/api/private-rooms/:privateRoomId/close-meeting', authMiddleware, (req
     return;
   }
 
+  captureSessionSnapshot({
+    privateRoomRecord: privateRoom,
+    meeting: activeMeetingBeforeClose,
+    runtimeRoom,
+  });
   privateRoom.updatedAt = new Date().toISOString();
   writePrivateRooms(privateRooms);
 
-  const runtimeRoom = rooms.get(normalizeRoomId(privateRoom.roomCode));
-
   if (runtimeRoom) {
-    const runtimeRoomId = normalizeRoomId(privateRoom.roomCode);
     io.to(runtimeRoomId).emit('room-closed', {
       message: 'Host closed this meeting.',
     });
@@ -473,6 +589,214 @@ app.post('/api/private-rooms/:privateRoomId/close-meeting', authMiddleware, (req
     ok: true,
     privateRoom: toPublicPrivateRoom(privateRoom),
   });
+});
+
+app.get('/api/private-rooms/:privateRoomId/participants', authMiddleware, (req, res) => {
+  const host = getHostById(req.auth.sub);
+
+  if (!host) {
+    res.status(401).json({ ok: false, error: 'Host account not found' });
+    return;
+  }
+
+  const privateRoomId = String(req.params.privateRoomId || '').trim();
+  const privateRoom = readPrivateRooms().find((room) => room.id === privateRoomId);
+
+  if (!privateRoom || privateRoom.hostId !== host.id) {
+    res.status(404).json({ ok: false, error: 'Private room not found' });
+    return;
+  }
+
+  res.status(200).json({
+    ok: true,
+    privateRoomId: privateRoom.id,
+    roomCode: privateRoom.roomCode,
+    participants: aggregateParticipants(privateRoom),
+    bannedParticipants: normalizeBannedParticipants(privateRoom.bannedParticipants),
+  });
+});
+
+app.post('/api/private-rooms/:privateRoomId/participants/ban', authMiddleware, (req, res) => {
+  const host = getHostById(req.auth.sub);
+
+  if (!host) {
+    res.status(401).json({ ok: false, error: 'Host account not found' });
+    return;
+  }
+
+  const privateRoomId = String(req.params.privateRoomId || '').trim();
+  const username = normalizeUsername(req.body?.username);
+  const usernameLower = usernameKey(username);
+
+  if (!usernameLower) {
+    res.status(400).json({ ok: false, error: 'Username is required' });
+    return;
+  }
+
+  const privateRooms = readPrivateRooms();
+  const privateRoom = privateRooms.find((room) => room.id === privateRoomId);
+
+  if (!privateRoom || privateRoom.hostId !== host.id) {
+    res.status(404).json({ ok: false, error: 'Private room not found' });
+    return;
+  }
+
+  privateRoom.bannedParticipants = normalizeBannedParticipants([
+    ...(privateRoom.bannedParticipants || []),
+    usernameLower,
+  ]);
+  privateRoom.updatedAt = new Date().toISOString();
+  writePrivateRooms(privateRooms);
+
+  const runtimeRoom = rooms.get(normalizeRoomId(privateRoom.roomCode));
+  if (runtimeRoom) {
+    runtimeRoom.bannedUsernames.add(usernameLower);
+  }
+
+  res.status(200).json({
+    ok: true,
+    privateRoom: toPublicPrivateRoom(privateRoom),
+  });
+});
+
+app.post('/api/private-rooms/:privateRoomId/participants/unban', authMiddleware, (req, res) => {
+  const host = getHostById(req.auth.sub);
+
+  if (!host) {
+    res.status(401).json({ ok: false, error: 'Host account not found' });
+    return;
+  }
+
+  const privateRoomId = String(req.params.privateRoomId || '').trim();
+  const username = normalizeUsername(req.body?.username);
+  const usernameLower = usernameKey(username);
+
+  if (!usernameLower) {
+    res.status(400).json({ ok: false, error: 'Username is required' });
+    return;
+  }
+
+  const privateRooms = readPrivateRooms();
+  const privateRoom = privateRooms.find((room) => room.id === privateRoomId);
+
+  if (!privateRoom || privateRoom.hostId !== host.id) {
+    res.status(404).json({ ok: false, error: 'Private room not found' });
+    return;
+  }
+
+  privateRoom.bannedParticipants = normalizeBannedParticipants(privateRoom.bannedParticipants).filter(
+    (item) => item !== usernameLower,
+  );
+  privateRoom.updatedAt = new Date().toISOString();
+  writePrivateRooms(privateRooms);
+
+  const runtimeRoom = rooms.get(normalizeRoomId(privateRoom.roomCode));
+  if (runtimeRoom) {
+    runtimeRoom.bannedUsernames.delete(usernameLower);
+  }
+
+  res.status(200).json({
+    ok: true,
+    privateRoom: toPublicPrivateRoom(privateRoom),
+  });
+});
+
+app.get('/api/private-rooms/:privateRoomId/session-history', authMiddleware, (req, res) => {
+  const host = getHostById(req.auth.sub);
+
+  if (!host) {
+    res.status(401).json({ ok: false, error: 'Host account not found' });
+    return;
+  }
+
+  const privateRoomId = String(req.params.privateRoomId || '').trim();
+  const privateRoom = readPrivateRooms().find((room) => room.id === privateRoomId);
+
+  if (!privateRoom || privateRoom.hostId !== host.id) {
+    res.status(404).json({ ok: false, error: 'Private room not found' });
+    return;
+  }
+
+  res.status(200).json({
+    ok: true,
+    privateRoomId: privateRoom.id,
+    roomCode: privateRoom.roomCode,
+    sessionHistory: (privateRoom.sessionHistory || []).map(toPublicSessionSnapshot),
+  });
+});
+
+app.get('/api/private-rooms/:privateRoomId/exports', authMiddleware, (req, res) => {
+  const host = getHostById(req.auth.sub);
+
+  if (!host) {
+    res.status(401).json({ ok: false, error: 'Host account not found' });
+    return;
+  }
+
+  const privateRoomId = String(req.params.privateRoomId || '').trim();
+  const format = String(req.query.format || 'json').trim().toLowerCase();
+  const privateRoom = readPrivateRooms().find((room) => room.id === privateRoomId);
+
+  if (!privateRoom || privateRoom.hostId !== host.id) {
+    res.status(404).json({ ok: false, error: 'Private room not found' });
+    return;
+  }
+
+  if (format === 'json') {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=\"${privateRoom.roomCode}-export.json\"`);
+    res.status(200).send(
+      JSON.stringify(
+        {
+          room: toPublicPrivateRoom(privateRoom),
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  if (format === 'csv') {
+    const rows = [];
+    rows.push(['roomCode', 'meetingName', 'meetingStatus', 'participant', 'joinCount', 'firstJoinedAt', 'lastJoinedAt'].join(','));
+
+    (privateRoom.meetings || []).forEach((meeting) => {
+      const participants = Array.isArray(meeting.participants) ? meeting.participants : [];
+
+      if (participants.length === 0) {
+        rows.push([
+          privateRoom.roomCode,
+          `"${String(meeting.name || '').replace(/\"/g, '\"\"')}"`,
+          meeting.status || '',
+          '',
+          '0',
+          '',
+          '',
+        ].join(','));
+        return;
+      }
+
+      participants.forEach((participant) => {
+        rows.push([
+          privateRoom.roomCode,
+          `"${String(meeting.name || '').replace(/\"/g, '\"\"')}"`,
+          meeting.status || '',
+          `"${String(participant.username || '').replace(/\"/g, '\"\"')}"`,
+          String(participant.joinCount || 0),
+          participant.firstJoinedAt || '',
+          participant.lastJoinedAt || '',
+        ].join(','));
+      });
+    });
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=\"${privateRoom.roomCode}-export.csv\"`);
+    res.status(200).send(rows.join('\n'));
+    return;
+  }
+
+  res.status(400).json({ ok: false, error: 'Unsupported export format. Use json or csv.' });
 });
 
 const io = new Server(server, {
@@ -522,6 +846,13 @@ const createUniquePrivateRoomCode = () => {
 const normalizeRoomId = (value) => String(value || '').trim().toUpperCase();
 const normalizeUsername = (value) => String(value || '').trim();
 const usernameKey = (value) => normalizeUsername(value).toLowerCase();
+const unique = (values) => Array.from(new Set(values));
+const normalizeBannedParticipants = (values) =>
+  unique(
+    (Array.isArray(values) ? values : [])
+      .map((value) => usernameKey(value))
+      .filter(Boolean),
+  );
 
 const sharedDocId = 'shared-main';
 const personalDocId = (username) => `personal-${username.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
@@ -624,6 +955,7 @@ const ensureRuntimeRoomFromPrivateRecord = (privateRoomRecord) => {
     existing.currentMeetingName = activeMeeting.name;
     existing.isPrivate = true;
     existing.password = privateRoomRecord.joinPasscodeHash;
+    existing.bannedUsernames = new Set(normalizeBannedParticipants(privateRoomRecord.bannedParticipants));
     return existing;
   }
 
@@ -638,6 +970,7 @@ const ensureRuntimeRoomFromPrivateRecord = (privateRoomRecord) => {
     activeMeetingId: activeMeeting.id,
     currentMeetingName: activeMeeting.name,
   });
+  room.bannedUsernames = new Set(normalizeBannedParticipants(privateRoomRecord.bannedParticipants));
 
   rooms.set(roomId, room);
   return room;
@@ -722,10 +1055,16 @@ const leaveCurrentRoom = (socket, options = {}) => {
     if (room.roomType === 'private' && room.privateRoomId) {
       const privateRooms = readPrivateRooms();
       const privateRoom = privateRooms.find((item) => item.id === room.privateRoomId);
+      const activeMeetingBeforeClose = privateRoom ? getOpenMeeting(privateRoom) : null;
 
       if (privateRoom) {
         const closed = closeOpenMeeting(privateRoom);
         if (closed) {
+          captureSessionSnapshot({
+            privateRoomRecord: privateRoom,
+            meeting: activeMeetingBeforeClose,
+            runtimeRoom: room,
+          });
           privateRoom.updatedAt = new Date().toISOString();
           writePrivateRooms(privateRooms);
         }
@@ -862,6 +1201,7 @@ io.on('connection', (socket) => {
     const roomId = privateRoomRecord
       ? normalizeRoomId(privateRoomRecord.roomCode)
       : requestedRoomId;
+    const normalizedUsernameKey = usernameKey(username);
 
     if (privateRoomRecord) {
       const passcodeValid = bcrypt.compareSync(joinPasscode, privateRoomRecord.joinPasscodeHash);
@@ -878,6 +1218,13 @@ io.on('connection', (socket) => {
       if (!runtimeRoom) {
         if (typeof ack === 'function') {
           ack({ ok: false, error: 'No active meeting. Host needs to start a new meeting.' });
+        }
+        return;
+      }
+
+      if (normalizeBannedParticipants(privateRoomRecord.bannedParticipants).includes(normalizedUsernameKey)) {
+        if (typeof ack === 'function') {
+          ack({ ok: false, error: 'You are not allowed to join this room' });
         }
         return;
       }
@@ -936,8 +1283,6 @@ io.on('connection', (socket) => {
         writePrivateRooms(privateRooms);
       }
     }
-    const normalizedUsernameKey = usernameKey(username);
-
     if (room.bannedUsernames.has(normalizedUsernameKey)) {
       if (typeof ack === 'function') {
         ack({ ok: false, error: 'You are not allowed to join this room' });
@@ -1091,6 +1436,20 @@ io.on('connection', (socket) => {
     }
 
     room.bannedUsernames.add(usernameKey(targetUsername));
+
+    if (room.roomType === 'private' && room.privateRoomId) {
+      const privateRooms = readPrivateRooms();
+      const privateRoom = privateRooms.find((item) => item.id === room.privateRoomId);
+
+      if (privateRoom) {
+        privateRoom.bannedParticipants = normalizeBannedParticipants([
+          ...(privateRoom.bannedParticipants || []),
+          usernameKey(targetUsername),
+        ]);
+        privateRoom.updatedAt = new Date().toISOString();
+        writePrivateRooms(privateRooms);
+      }
+    }
 
     const targetUser = room.users.find(
       (user) => usernameKey(user.username) === usernameKey(targetUsername),

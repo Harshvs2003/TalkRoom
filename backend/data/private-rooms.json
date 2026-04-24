@@ -61,7 +61,9 @@
         "participants": []
       }
     ],
-    "workspaceName": "Serius Workspace"
+    "workspaceName": "Serius Workspace",
+    "bannedParticipants": [],
+    "sessionHistory": []
   },
   {
     "id": "7b82a01d-9dbb-45df-a6f8-686c4a192841",
@@ -72,7 +74,7 @@
     "roomCode": "A3MP4EW4YU",
     "joinPasscodeHash": "$2b$10$vculO1xtHU9hYI6sUY7HZuGMgifUuJfbVoQZ/Ke0cqxedIg8TZPCi",
     "createdAt": "2026-04-24T17:34:21.762Z",
-    "updatedAt": "2026-04-24T21:09:00.679Z",
+    "updatedAt": "2026-04-24T21:19:26.110Z",
     "meetings": [
       {
         "id": "0ed2276f-988d-4983-8a96-e6cd096ba73f",
@@ -161,9 +163,9 @@
       {
         "id": "df1454f9-1555-45e7-8e2f-1ca7461f6e16",
         "name": "start-50d",
-        "status": "open",
+        "status": "closed",
         "startedAt": "2026-04-24T21:08:40.338Z",
-        "closedAt": null,
+        "closedAt": "2026-04-24T21:18:21.600Z",
         "participants": [
           {
             "username": "Cereby",
@@ -178,8 +180,31 @@
             "joinCount": 1
           }
         ]
+      },
+      {
+        "id": "2f1087fd-6858-4429-b2da-e5f90b045822",
+        "name": "start-70",
+        "status": "closed",
+        "startedAt": "2026-04-24T21:18:53.158Z",
+        "closedAt": "2026-04-24T21:19:26.110Z",
+        "participants": [
+          {
+            "username": "Cereby",
+            "firstJoinedAt": "2026-04-24T21:18:59.681Z",
+            "lastJoinedAt": "2026-04-24T21:19:18.090Z",
+            "joinCount": 2
+          },
+          {
+            "username": "Serius",
+            "firstJoinedAt": "2026-04-24T21:19:00.897Z",
+            "lastJoinedAt": "2026-04-24T21:19:14.788Z",
+            "joinCount": 2
+          }
+        ]
       }
-    ]
+    ],
+    "bannedParticipants": [],
+    "sessionHistory": []
   },
   {
     "id": "f4687e96-5be4-41ee-a2e0-8a04dbfd2f5e",
@@ -200,7 +225,9 @@
         "closedAt": null,
         "participants": []
       }
-    ]
+    ],
+    "bannedParticipants": [],
+    "sessionHistory": []
   },
   {
     "id": "3ee1622f-35af-4330-b1f4-f2b58e2163b5",
@@ -221,7 +248,9 @@
         "closedAt": null,
         "participants": []
       }
-    ]
+    ],
+    "bannedParticipants": [],
+    "sessionHistory": []
   },
   {
     "id": "5354e9c5-751c-40a7-bb52-e074509ad947",
@@ -249,7 +278,9 @@
           }
         ]
       }
-    ]
+    ],
+    "bannedParticipants": [],
+    "sessionHistory": []
   },
   {
     "id": "b23c85a4-a196-414c-9e07-8d1ced40935c",
@@ -277,7 +308,9 @@
           }
         ]
       }
-    ]
+    ],
+    "bannedParticipants": [],
+    "sessionHistory": []
   },
   {
     "id": "0ade4456-3561-414a-bb5f-eb9dafc1ec7e",
@@ -305,6 +338,8 @@
           }
         ]
       }
-    ]
+    ],
+    "bannedParticipants": [],
+    "sessionHistory": []
   }
 ]
