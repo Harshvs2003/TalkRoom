@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const Y = require('yjs');
-require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const PORT = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -458,14 +458,15 @@ app.post('/api/private-rooms/:privateRoomId/close-meeting', authMiddleware, (req
   privateRoom.updatedAt = new Date().toISOString();
   writePrivateRooms(privateRooms);
 
-  const runtimeRoom = rooms.get(privateRoom.roomCode);
+  const runtimeRoom = rooms.get(normalizeRoomId(privateRoom.roomCode));
 
   if (runtimeRoom) {
-    io.to(privateRoom.roomCode).emit('room-closed', {
+    const runtimeRoomId = normalizeRoomId(privateRoom.roomCode);
+    io.to(runtimeRoomId).emit('room-closed', {
       message: 'Host closed this meeting.',
     });
-    clearRoomCleanupTimer(privateRoom.roomCode);
-    rooms.delete(privateRoom.roomCode);
+    clearRoomCleanupTimer(runtimeRoomId);
+    rooms.delete(runtimeRoomId);
   }
 
   res.status(200).json({
@@ -542,6 +543,41 @@ const toPublicRoomState = (room) => ({
   docs: room.docs.map(toPublicDoc),
 });
 
+const createRuntimeRoom = ({
+  hostUsername,
+  hostOwnerId = null,
+  hostSocketId = null,
+  roomType = 'temporary',
+  isPrivate = false,
+  password = null,
+  privateRoomId = null,
+  activeMeetingId = null,
+  currentMeetingName = null,
+}) => ({
+  users: [],
+  text: '',
+  isPrivate,
+  password,
+  hostUsername,
+  hostOwnerId,
+  hostSocketId,
+  roomType,
+  privateRoomId,
+  activeMeetingId,
+  currentMeetingName,
+  viewMode: 'single_shared',
+  bannedUsernames: new Set(),
+  docs: [
+    {
+      id: sharedDocId,
+      name: 'Shared Screen',
+      type: 'shared',
+      ownerUsername: null,
+      ydoc: new Y.Doc(),
+    },
+  ],
+});
+
 const emitUsersUpdate = (roomId) => {
   const room = rooms.get(roomId);
 
@@ -575,7 +611,7 @@ const clearRoomCleanupTimer = (roomId) => {
 };
 
 const ensureRuntimeRoomFromPrivateRecord = (privateRoomRecord) => {
-  const roomId = privateRoomRecord.roomCode;
+  const roomId = normalizeRoomId(privateRoomRecord.roomCode);
   const activeMeeting = getOpenMeeting(privateRoomRecord);
   const existing = rooms.get(roomId);
 
@@ -586,30 +622,22 @@ const ensureRuntimeRoomFromPrivateRecord = (privateRoomRecord) => {
   if (existing) {
     existing.activeMeetingId = activeMeeting.id;
     existing.currentMeetingName = activeMeeting.name;
+    existing.isPrivate = true;
+    existing.password = privateRoomRecord.joinPasscodeHash;
     return existing;
   }
 
-  const room = {
-    users: [],
+  const room = createRuntimeRoom({
     hostUsername: privateRoomRecord.hostDisplayName || privateRoomRecord.hostName || 'Host',
     hostOwnerId: privateRoomRecord.hostId,
     hostSocketId: null,
     roomType: 'private',
+    isPrivate: true,
+    password: privateRoomRecord.joinPasscodeHash,
     privateRoomId: privateRoomRecord.id,
     activeMeetingId: activeMeeting.id,
     currentMeetingName: activeMeeting.name,
-    viewMode: 'single_shared',
-    bannedUsernames: new Set(),
-    docs: [
-      {
-        id: sharedDocId,
-        name: 'Shared Screen',
-        type: 'shared',
-        ownerUsername: null,
-        ydoc: new Y.Doc(),
-      },
-    ],
-  };
+  });
 
   rooms.set(roomId, room);
   return room;
@@ -717,6 +745,10 @@ const leaveCurrentRoom = (socket, options = {}) => {
   }
 
   room.users = room.users.filter((user) => user.socketId !== socket.id);
+  if (leavingUsername) {
+    console.log('User left:', roomId, leavingUsername);
+    console.log('Users in room:', room.users.length);
+  }
 
   socket.leave(roomId);
 
@@ -780,23 +812,14 @@ io.on('connection', (socket) => {
       roomId = createUniqueRoomId();
     }
 
-    rooms.set(roomId, {
-      users: [],
-      hostUsername,
-      hostOwnerId: null,
-      roomType: 'temporary',
-      viewMode: 'single_shared',
-      bannedUsernames: new Set(),
-      docs: [
-        {
-          id: sharedDocId,
-          name: 'Shared Screen',
-          type: 'shared',
-          ownerUsername: null,
-          ydoc: new Y.Doc(),
-        },
-      ],
-    });
+    rooms.set(
+      roomId,
+      createRuntimeRoom({
+        hostUsername,
+        roomType: 'temporary',
+        isPrivate: false,
+      }),
+    );
 
     if (typeof ack === 'function') {
       ack({ ok: true, roomId, message: 'Room Created' });
@@ -804,7 +827,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('join-room', (payload, ack) => {
-    const roomId = normalizeRoomId(payload?.roomId);
+    const requestedRoomId = normalizeRoomId(payload?.roomId);
     const username = normalizeUsername(payload?.username);
     const joinPasscode = String(payload?.joinPasscode || '');
     const hostToken = String(payload?.hostToken || '');
@@ -819,7 +842,7 @@ io.on('connection', (socket) => {
       }
     }
 
-    if (!/^[A-Z0-9]{3,12}$/.test(roomId)) {
+    if (!/^[A-Z0-9]{3,12}$/.test(requestedRoomId)) {
       if (typeof ack === 'function') {
         ack({ ok: false, error: 'Invalid room code' });
       }
@@ -833,7 +856,12 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const privateRoomRecord = readPrivateRooms().find((room) => room.roomCode === roomId);
+    const privateRoomRecord = readPrivateRooms().find(
+      (room) => normalizeRoomId(room.roomCode) === requestedRoomId,
+    );
+    const roomId = privateRoomRecord
+      ? normalizeRoomId(privateRoomRecord.roomCode)
+      : requestedRoomId;
 
     if (privateRoomRecord) {
       const passcodeValid = bcrypt.compareSync(joinPasscode, privateRoomRecord.joinPasscodeHash);
@@ -865,6 +893,13 @@ io.on('connection', (socket) => {
     }
 
     const room = rooms.get(roomId);
+    if (!room) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Room does not exist' });
+      }
+      return;
+    }
+
     clearRoomCleanupTimer(roomId);
     if (room.roomType === 'private' && privateRoomRecord) {
       room.hostOwnerId = privateRoomRecord.hostId;
@@ -927,6 +962,11 @@ io.on('connection', (socket) => {
     ensurePersonalDoc(room, username);
 
     socket.join(roomId);
+    console.log('JOIN:', roomId, username);
+    console.log('ROOM USERS:', room.users.length);
+    console.log('SOCKET ROOMS:', Array.from(socket.rooms));
+    console.log('User joined:', roomId, username);
+    console.log('Users in room:', room.users.length);
     socket.data.roomId = roomId;
     socket.data.username = username;
     socket.data.hostId = joiningHostId;
@@ -944,8 +984,26 @@ io.on('connection', (socket) => {
           docId: doc.id,
           update: Array.from(Y.encodeStateAsUpdate(doc.ydoc)),
         })),
+        text: room.text || '',
       });
     }
+  });
+
+  socket.on('send-changes', (payload) => {
+    const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
+    const text = String(payload?.text ?? payload ?? '');
+
+    if (!roomId || !rooms.has(roomId)) {
+      return;
+    }
+
+    if (socket.data.roomId !== roomId) {
+      return;
+    }
+
+    const room = rooms.get(roomId);
+    room.text = text;
+    socket.to(roomId).emit('receive-changes', text);
   });
 
   socket.on('set-view-mode', (payload, ack) => {
@@ -1122,4 +1180,5 @@ io.on('connection', (socket) => {
 
 server.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
+  console.log(`Allowed frontend origins: ${allowedOrigins.join(', ')}`);
 });
