@@ -153,4 +153,30 @@ const createStores = ({ hostsCollection, privateRoomsCollection }) => {
   };
 };
 
-module.exports = { createStores };
+const createMemoryStores = () => {
+  let hosts = [];
+  let privateRooms = [];
+
+  return {
+    readHosts: async () => [...hosts],
+    writeHosts: async (nextHosts) => {
+      hosts = Array.isArray(nextHosts) ? [...nextHosts] : [];
+    },
+    readPrivateRooms: async () => [...privateRooms],
+    writePrivateRooms: async (nextPrivateRooms) => {
+      privateRooms = Array.isArray(nextPrivateRooms) ? [...nextPrivateRooms] : [];
+    },
+    migrateLegacyJsonIfNeeded: async () => {
+      if (hosts.length === 0) {
+        hosts = readArrayJsonFile(hostsDataPath);
+      }
+      if (privateRooms.length === 0) {
+        privateRooms = readArrayJsonFile(privateRoomsDataPath).map(
+          (room) => normalizePrivateRoomRecord(room).record,
+        );
+      }
+    },
+  };
+};
+
+module.exports = { createStores, createMemoryStores };

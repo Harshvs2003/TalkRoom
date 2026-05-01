@@ -8,7 +8,7 @@ const jwt = require('jsonwebtoken');
 const Y = require('yjs');
 const config = require('./src/config');
 const { initializeDatabase } = require('./src/db');
-const { createStores } = require('./src/stores');
+const { createStores, createMemoryStores } = require('./src/stores');
 
 const {
   PORT,
@@ -24,6 +24,7 @@ const {
 
 const app = express();
 const server = http.createServer(app);
+let dbStatus = 'disconnected';
 
 const allowedOrigins = FRONTEND_URL.split(',').map((url) => url.trim());
 
@@ -36,7 +37,7 @@ app.use(
 app.use(express.json());
 
 app.get('/health', (_req, res) => {
-  res.status(200).json({ status: 'ok' });
+  res.status(200).json({ status: 'ok', dbStatus });
 });
 
 let db = null;
@@ -1457,21 +1458,35 @@ io.on('connection', (socket) => {
 });
 
 const bootstrap = async () => {
-  const dbState = await initializeDatabase(MONGODB_URI);
-  db = dbState.db;
-  const stores = createStores(dbState.collections);
-  readHosts = stores.readHosts;
-  writeHosts = stores.writeHosts;
-  readPrivateRooms = stores.readPrivateRooms;
-  writePrivateRooms = stores.writePrivateRooms;
-  migrateLegacyJsonIfNeeded = stores.migrateLegacyJsonIfNeeded;
+  try {
+    const dbState = await initializeDatabase(MONGODB_URI);
+    db = dbState.db;
+    const stores = createStores(dbState.collections);
+    readHosts = stores.readHosts;
+    writeHosts = stores.writeHosts;
+    readPrivateRooms = stores.readPrivateRooms;
+    writePrivateRooms = stores.writePrivateRooms;
+    migrateLegacyJsonIfNeeded = stores.migrateLegacyJsonIfNeeded;
+    dbStatus = 'connected';
+  } catch (error) {
+    const fallbackStores = createMemoryStores();
+    readHosts = fallbackStores.readHosts;
+    writeHosts = fallbackStores.writeHosts;
+    readPrivateRooms = fallbackStores.readPrivateRooms;
+    writePrivateRooms = fallbackStores.writePrivateRooms;
+    migrateLegacyJsonIfNeeded = fallbackStores.migrateLegacyJsonIfNeeded;
+    dbStatus = 'fallback-memory';
+    console.error('MongoDB unavailable. Started with in-memory fallback:', error?.message || error);
+  }
+
   await migrateLegacyJsonIfNeeded();
   await hydrateRuntimeRoomsFromPrivateRooms();
 
   server.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
     console.log(`Allowed frontend origins: ${allowedOrigins.join(', ')}`);
-    console.log(`MongoDB database: ${db.databaseName}`);
+    const dbLabel = db?.databaseName || 'memory-fallback';
+    console.log(`MongoDB database: ${dbLabel}`);
   });
 };
 
