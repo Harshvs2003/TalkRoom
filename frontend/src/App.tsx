@@ -11,7 +11,11 @@ import {
 } from 'y-protocols/awareness';
 import 'quill/dist/quill.snow.css';
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000';
+const rawBackendUrl = String(import.meta.env.VITE_BACKEND_URL || '').trim();
+const isLocalBackendUrl = /localhost|127\.0\.0\.1/i.test(rawBackendUrl);
+const BACKEND_URL = import.meta.env.PROD
+  ? (isLocalBackendUrl ? '' : rawBackendUrl)
+  : (rawBackendUrl || 'http://localhost:4000');
 const USERNAME_STORAGE_KEY = 'talkroom_username';
 const REMEMBER_NAME_KEY = 'talkroom_remember_name';
 const SESSION_USERNAME_KEY = 'talkroom_session_username';
@@ -499,6 +503,11 @@ function App() {
       setConnected(false);
     };
 
+    const handleConnectError = () => {
+      setConnected(false);
+      setErrorMessage('Unable to connect to backend. Check VITE_BACKEND_URL and backend deployment health.');
+    };
+
     const handleUsersUpdate = (nextUsers: string[]) => {
       setUsers(Array.isArray(nextUsers) ? nextUsers : []);
     };
@@ -563,6 +572,7 @@ function App() {
 
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
+    socket.on('connect_error', handleConnectError);
     socket.on('users-update', handleUsersUpdate);
     socket.on('room-state', handleRoomState);
     socket.on('yjs-update', handleYjsUpdate);
@@ -574,6 +584,7 @@ function App() {
       socket.emit('leave-room');
       socket.off('connect', handleConnect);
       socket.off('disconnect', handleDisconnect);
+      socket.off('connect_error', handleConnectError);
       socket.off('users-update', handleUsersUpdate);
       socket.off('room-state', handleRoomState);
       socket.off('yjs-update', handleYjsUpdate);
