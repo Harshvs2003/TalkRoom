@@ -9,28 +9,29 @@ A full-stack collaborative notepad using React + TypeScript (frontend), Node.js 
 
 ## Environment Variables
 
-1. Backend env:
+1. Backend env (`backend/.env`):
 
 ```bash
 cd backend
-cp .env.example .env
+cat > .env
 ```
-
-`backend/.env.example`
 
 ```env
 PORT=4000
 FRONTEND_URL=http://localhost:5173
+EMPTY_ROOM_TTL_MS=120000
+JWT_SECRET=change-this-in-production
+JWT_EXPIRES_IN=7d
+BCRYPT_SALT_ROUNDS=10
+MONGODB_URI=mongodb://127.0.0.1:27017/talkroom
 ```
 
-2. Frontend env:
+2. Frontend env (`frontend/.env`):
 
 ```bash
 cd frontend
-cp .env.example .env
+cat > .env
 ```
-
-`frontend/.env.example`
 
 ```env
 VITE_BACKEND_URL=http://localhost:4000
