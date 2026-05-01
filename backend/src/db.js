@@ -1,7 +1,13 @@
 const { MongoClient } = require('mongodb');
 
 const initializeDatabase = async (mongoUri) => {
-  const client = new MongoClient(mongoUri);
+  const client = new MongoClient(mongoUri, {
+    // Render/Atlas deployments can intermittently fail TLS handshakes on IPv6 paths.
+    // Forcing IPv4 makes server selection more stable across platforms.
+    family: 4,
+    serverSelectionTimeoutMS: 15000,
+    connectTimeoutMS: 15000,
+  });
   await client.connect();
 
   let db = client.db();

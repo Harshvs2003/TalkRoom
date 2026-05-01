@@ -1477,5 +1477,9 @@ const bootstrap = async () => {
 
 bootstrap().catch((error) => {
   console.error('Failed to start server:', error);
+  if (String(error?.name || '').includes('Mongo') || String(error?.message || '').includes('SSL')) {
+    console.error('MongoDB connection hint: verify Atlas Network Access (allow Render egress or 0.0.0.0/0),');
+    console.error('use the SRV URI from Atlas exactly, and ensure the DB user/password are correct.');
+  }
   process.exit(1);
 });
