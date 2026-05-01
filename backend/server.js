@@ -2,26 +2,25 @@ const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { MongoClient } = require('mongodb');
 const Y = require('yjs');
-require('dotenv').config({ path: path.join(__dirname, '.env') });
+const config = require('./src/config');
+const { initializeDatabase } = require('./src/db');
+const { createStores } = require('./src/stores');
 
-const PORT = process.env.PORT || 4000;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-const ROOM_ID_LENGTH = 6;
-const PRIVATE_ROOM_CODE_LENGTH = 10;
-const EMPTY_ROOM_TTL_MS = Number(process.env.EMPTY_ROOM_TTL_MS || 120000);
-const JWT_SECRET = process.env.JWT_SECRET || 'change-this-in-production';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
-const BCRYPT_SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 10);
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/talkroom';
-const hostsDataPath = path.join(__dirname, 'data', 'hosts.json');
-const privateRoomsDataPath = path.join(__dirname, 'data', 'private-rooms.json');
+const {
+  PORT,
+  FRONTEND_URL,
+  ROOM_ID_LENGTH,
+  PRIVATE_ROOM_CODE_LENGTH,
+  EMPTY_ROOM_TTL_MS,
+  JWT_SECRET,
+  JWT_EXPIRES_IN,
+  BCRYPT_SALT_ROUNDS,
+  MONGODB_URI,
+} = config;
 
 const app = express();
 const server = http.createServer(app);
@@ -40,158 +39,12 @@ app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok' });
 });
 
-let mongoClient = null;
 let db = null;
-let hostsCollection = null;
-let privateRoomsCollection = null;
-
-const normalizePrivateRoomRecord = (room) => {
-  const nextRoom = { ...room };
-  let migrated = false;
-
-  if (!Array.isArray(nextRoom.meetings)) {
-    const seedName = String(nextRoom.name || 'Meeting 1').trim() || 'Meeting 1';
-    const now = new Date().toISOString();
-    nextRoom.meetings = [
-      {
-        id: crypto.randomUUID(),
-        name: seedName,
-        status: 'open',
-        startedAt: now,
-        closedAt: null,
-        participants: [],
-      },
-    ];
-    nextRoom.workspaceName = nextRoom.workspaceName || `${nextRoom.hostDisplayName || nextRoom.hostName || 'Host'} Workspace`;
-    migrated = true;
-  }
-
-  if (!nextRoom.workspaceName) {
-    nextRoom.workspaceName = `${nextRoom.hostDisplayName || nextRoom.hostName || 'Host'} Workspace`;
-    migrated = true;
-  }
-
-  const normalizedBanned = normalizeBannedParticipants(nextRoom.bannedParticipants);
-  if (!Array.isArray(nextRoom.bannedParticipants) || normalizedBanned.length !== nextRoom.bannedParticipants.length) {
-    nextRoom.bannedParticipants = normalizedBanned;
-    migrated = true;
-  }
-
-  if (!Array.isArray(nextRoom.sessionHistory)) {
-    nextRoom.sessionHistory = [];
-    migrated = true;
-  }
-
-  return { record: nextRoom, migrated };
-};
-
-const initializeDatabase = async () => {
-  mongoClient = new MongoClient(MONGODB_URI);
-  await mongoClient.connect();
-  db = mongoClient.db();
-  if (!db?.databaseName || db.databaseName === 'test') {
-    throw new Error('MONGODB_URI must include a database name, e.g. mongodb://127.0.0.1:27017/talkroom');
-  }
-  hostsCollection = db.collection('hosts');
-  privateRoomsCollection = db.collection('privateRooms');
-
-  await Promise.all([
-    hostsCollection.createIndex({ email: 1 }, { unique: true }),
-    hostsCollection.createIndex({ id: 1 }, { unique: true }),
-    privateRoomsCollection.createIndex({ id: 1 }, { unique: true }),
-    privateRoomsCollection.createIndex({ roomCode: 1 }, { unique: true }),
-    privateRoomsCollection.createIndex({ hostId: 1 }),
-  ]);
-};
-
-const readArrayJsonFile = (filePath) => {
-  try {
-    if (!fs.existsSync(filePath)) {
-      return [];
-    }
-    const raw = fs.readFileSync(filePath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-};
-
-const migrateLegacyJsonIfNeeded = async () => {
-  const [hostsCount, privateRoomsCount] = await Promise.all([
-    hostsCollection.countDocuments({}),
-    privateRoomsCollection.countDocuments({}),
-  ]);
-
-  if (hostsCount === 0) {
-    const legacyHosts = readArrayJsonFile(hostsDataPath);
-    if (legacyHosts.length > 0) {
-      await hostsCollection.insertMany(legacyHosts);
-    }
-  }
-
-  if (privateRoomsCount === 0) {
-    const legacyPrivateRooms = readArrayJsonFile(privateRoomsDataPath);
-    if (legacyPrivateRooms.length > 0) {
-      const normalized = legacyPrivateRooms.map((room) => normalizePrivateRoomRecord(room).record);
-      await privateRoomsCollection.insertMany(normalized);
-    }
-  }
-};
-
-const writeHosts = async (hosts) => {
-  const hostIds = hosts.map((host) => host.id).filter(Boolean);
-  const ops = hosts.map((host) => ({
-    replaceOne: {
-      filter: { id: host.id },
-      replacement: host,
-      upsert: true,
-    },
-  }));
-
-  if (ops.length > 0) {
-    await hostsCollection.bulkWrite(ops, { ordered: false });
-  }
-
-  await hostsCollection.deleteMany(hostIds.length ? { id: { $nin: hostIds } } : {});
-};
-
-const readHosts = async () => hostsCollection.find({}).toArray();
-
-const writePrivateRooms = async (privateRooms) => {
-  const roomIds = privateRooms.map((room) => room.id).filter(Boolean);
-  const ops = privateRooms.map((room) => ({
-    replaceOne: {
-      filter: { id: room.id },
-      replacement: room,
-      upsert: true,
-    },
-  }));
-
-  if (ops.length > 0) {
-    await privateRoomsCollection.bulkWrite(ops, { ordered: false });
-  }
-
-  await privateRoomsCollection.deleteMany(roomIds.length ? { id: { $nin: roomIds } } : {});
-};
-
-const readPrivateRooms = async () => {
-  const privateRooms = await privateRoomsCollection.find({}).toArray();
-  let migrated = false;
-  const normalized = privateRooms.map((room) => {
-    const { record, migrated: recordMigrated } = normalizePrivateRoomRecord(room);
-    if (recordMigrated) {
-      migrated = true;
-    }
-    return record;
-  });
-
-  if (migrated) {
-    await writePrivateRooms(normalized);
-  }
-
-  return normalized;
-};
+let readHosts = async () => [];
+let writeHosts = async () => {};
+let readPrivateRooms = async () => [];
+let writePrivateRooms = async () => {};
+let migrateLegacyJsonIfNeeded = async () => {};
 
 const getOpenMeeting = (privateRoomRecord) =>
   privateRoomRecord.meetings.find((meeting) => meeting.status === 'open') || null;
@@ -1604,7 +1457,14 @@ io.on('connection', (socket) => {
 });
 
 const bootstrap = async () => {
-  await initializeDatabase();
+  const dbState = await initializeDatabase(MONGODB_URI);
+  db = dbState.db;
+  const stores = createStores(dbState.collections);
+  readHosts = stores.readHosts;
+  writeHosts = stores.writeHosts;
+  readPrivateRooms = stores.readPrivateRooms;
+  writePrivateRooms = stores.writePrivateRooms;
+  migrateLegacyJsonIfNeeded = stores.migrateLegacyJsonIfNeeded;
   await migrateLegacyJsonIfNeeded();
   await hydrateRuntimeRoomsFromPrivateRooms();
 
