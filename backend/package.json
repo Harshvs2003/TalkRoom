@@ -4,7 +4,7 @@
   "description": "Socket.IO backend for collaborative notepad",
   "main": "server.js",
   "scripts": {
-    "dev": "nodemon --ext js --ignore data/*.json server.js",
+    "dev": "nodemon --ext js server.js",
     "start": "node server.js"
   },
   "dependencies": {
@@ -13,6 +13,7 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
+    "mongodb": "^6.15.0",
     "socket.io": "^4.8.1",
     "yjs": "^13.6.27"
   },

@@ -7,6 +7,7 @@ const path = require('path');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const { MongoClient } = require('mongodb');
 const Y = require('yjs');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
@@ -18,6 +19,9 @@ const EMPTY_ROOM_TTL_MS = Number(process.env.EMPTY_ROOM_TTL_MS || 120000);
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 const BCRYPT_SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 10);
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/talkroom';
+const hostsDataPath = path.join(__dirname, 'data', 'hosts.json');
+const privateRoomsDataPath = path.join(__dirname, 'data', 'private-rooms.json');
 
 const app = express();
 const server = http.createServer(app);
@@ -36,25 +40,76 @@ app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok' });
 });
 
-const hostsDataDir = path.join(__dirname, 'data');
-const hostsDataPath = path.join(hostsDataDir, 'hosts.json');
-const privateRoomsDataPath = path.join(hostsDataDir, 'private-rooms.json');
+let mongoClient = null;
+let db = null;
+let hostsCollection = null;
+let privateRoomsCollection = null;
 
-const ensureHostsStore = () => {
-  if (!fs.existsSync(hostsDataDir)) {
-    fs.mkdirSync(hostsDataDir, { recursive: true });
+const normalizePrivateRoomRecord = (room) => {
+  const nextRoom = { ...room };
+  let migrated = false;
+
+  if (!Array.isArray(nextRoom.meetings)) {
+    const seedName = String(nextRoom.name || 'Meeting 1').trim() || 'Meeting 1';
+    const now = new Date().toISOString();
+    nextRoom.meetings = [
+      {
+        id: crypto.randomUUID(),
+        name: seedName,
+        status: 'open',
+        startedAt: now,
+        closedAt: null,
+        participants: [],
+      },
+    ];
+    nextRoom.workspaceName = nextRoom.workspaceName || `${nextRoom.hostDisplayName || nextRoom.hostName || 'Host'} Workspace`;
+    migrated = true;
   }
 
-  if (!fs.existsSync(hostsDataPath)) {
-    fs.writeFileSync(hostsDataPath, '[]', 'utf-8');
+  if (!nextRoom.workspaceName) {
+    nextRoom.workspaceName = `${nextRoom.hostDisplayName || nextRoom.hostName || 'Host'} Workspace`;
+    migrated = true;
   }
+
+  const normalizedBanned = normalizeBannedParticipants(nextRoom.bannedParticipants);
+  if (!Array.isArray(nextRoom.bannedParticipants) || normalizedBanned.length !== nextRoom.bannedParticipants.length) {
+    nextRoom.bannedParticipants = normalizedBanned;
+    migrated = true;
+  }
+
+  if (!Array.isArray(nextRoom.sessionHistory)) {
+    nextRoom.sessionHistory = [];
+    migrated = true;
+  }
+
+  return { record: nextRoom, migrated };
 };
 
-const readHosts = () => {
-  ensureHostsStore();
+const initializeDatabase = async () => {
+  mongoClient = new MongoClient(MONGODB_URI);
+  await mongoClient.connect();
+  db = mongoClient.db();
+  if (!db?.databaseName || db.databaseName === 'test') {
+    throw new Error('MONGODB_URI must include a database name, e.g. mongodb://127.0.0.1:27017/talkroom');
+  }
+  hostsCollection = db.collection('hosts');
+  privateRoomsCollection = db.collection('privateRooms');
 
+  await Promise.all([
+    hostsCollection.createIndex({ email: 1 }, { unique: true }),
+    hostsCollection.createIndex({ id: 1 }, { unique: true }),
+    privateRoomsCollection.createIndex({ id: 1 }, { unique: true }),
+    privateRoomsCollection.createIndex({ roomCode: 1 }, { unique: true }),
+    privateRoomsCollection.createIndex({ hostId: 1 }),
+  ]);
+};
+
+const readArrayJsonFile = (filePath) => {
   try {
-    const raw = fs.readFileSync(hostsDataPath, 'utf-8');
+    if (!fs.existsSync(filePath)) {
+      return [];
+    }
+    const raw = fs.readFileSync(filePath, 'utf-8');
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -62,79 +117,80 @@ const readHosts = () => {
   }
 };
 
-const writeHosts = (hosts) => {
-  ensureHostsStore();
-  fs.writeFileSync(hostsDataPath, JSON.stringify(hosts, null, 2), 'utf-8');
-};
+const migrateLegacyJsonIfNeeded = async () => {
+  const [hostsCount, privateRoomsCount] = await Promise.all([
+    hostsCollection.countDocuments({}),
+    privateRoomsCollection.countDocuments({}),
+  ]);
 
-const readPrivateRooms = () => {
-  ensureHostsStore();
-
-  if (!fs.existsSync(privateRoomsDataPath)) {
-    fs.writeFileSync(privateRoomsDataPath, '[]', 'utf-8');
-  }
-
-  try {
-    const raw = fs.readFileSync(privateRoomsDataPath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    const privateRooms = Array.isArray(parsed) ? parsed : [];
-    let migrated = false;
-
-    const normalized = privateRooms.map((room) => {
-      const nextRoom = { ...room };
-
-      if (!Array.isArray(nextRoom.meetings)) {
-        const seedName = String(nextRoom.name || 'Meeting 1').trim() || 'Meeting 1';
-        const now = new Date().toISOString();
-        nextRoom.meetings = [
-          {
-            id: crypto.randomUUID(),
-            name: seedName,
-            status: 'open',
-            startedAt: now,
-            closedAt: null,
-            participants: [],
-          },
-        ];
-        nextRoom.workspaceName = nextRoom.workspaceName || `${nextRoom.hostDisplayName || nextRoom.hostName || 'Host'} Workspace`;
-        migrated = true;
-      }
-
-      if (!nextRoom.workspaceName) {
-        nextRoom.workspaceName = `${nextRoom.hostDisplayName || nextRoom.hostName || 'Host'} Workspace`;
-        migrated = true;
-      }
-
-      const normalizedBannedParticipants = normalizeBannedParticipants(nextRoom.bannedParticipants);
-      if (
-        !Array.isArray(nextRoom.bannedParticipants) ||
-        normalizedBannedParticipants.length !== nextRoom.bannedParticipants.length
-      ) {
-        nextRoom.bannedParticipants = normalizedBannedParticipants;
-        migrated = true;
-      }
-
-      if (!Array.isArray(nextRoom.sessionHistory)) {
-        nextRoom.sessionHistory = [];
-        migrated = true;
-      }
-
-      return nextRoom;
-    });
-
-    if (migrated) {
-      writePrivateRooms(normalized);
+  if (hostsCount === 0) {
+    const legacyHosts = readArrayJsonFile(hostsDataPath);
+    if (legacyHosts.length > 0) {
+      await hostsCollection.insertMany(legacyHosts);
     }
+  }
 
-    return normalized;
-  } catch {
-    return [];
+  if (privateRoomsCount === 0) {
+    const legacyPrivateRooms = readArrayJsonFile(privateRoomsDataPath);
+    if (legacyPrivateRooms.length > 0) {
+      const normalized = legacyPrivateRooms.map((room) => normalizePrivateRoomRecord(room).record);
+      await privateRoomsCollection.insertMany(normalized);
+    }
   }
 };
 
-const writePrivateRooms = (privateRooms) => {
-  ensureHostsStore();
-  fs.writeFileSync(privateRoomsDataPath, JSON.stringify(privateRooms, null, 2), 'utf-8');
+const writeHosts = async (hosts) => {
+  const hostIds = hosts.map((host) => host.id).filter(Boolean);
+  const ops = hosts.map((host) => ({
+    replaceOne: {
+      filter: { id: host.id },
+      replacement: host,
+      upsert: true,
+    },
+  }));
+
+  if (ops.length > 0) {
+    await hostsCollection.bulkWrite(ops, { ordered: false });
+  }
+
+  await hostsCollection.deleteMany(hostIds.length ? { id: { $nin: hostIds } } : {});
+};
+
+const readHosts = async () => hostsCollection.find({}).toArray();
+
+const writePrivateRooms = async (privateRooms) => {
+  const roomIds = privateRooms.map((room) => room.id).filter(Boolean);
+  const ops = privateRooms.map((room) => ({
+    replaceOne: {
+      filter: { id: room.id },
+      replacement: room,
+      upsert: true,
+    },
+  }));
+
+  if (ops.length > 0) {
+    await privateRoomsCollection.bulkWrite(ops, { ordered: false });
+  }
+
+  await privateRoomsCollection.deleteMany(roomIds.length ? { id: { $nin: roomIds } } : {});
+};
+
+const readPrivateRooms = async () => {
+  const privateRooms = await privateRoomsCollection.find({}).toArray();
+  let migrated = false;
+  const normalized = privateRooms.map((room) => {
+    const { record, migrated: recordMigrated } = normalizePrivateRoomRecord(room);
+    if (recordMigrated) {
+      migrated = true;
+    }
+    return record;
+  });
+
+  if (migrated) {
+    await writePrivateRooms(normalized);
+  }
+
+  return normalized;
 };
 
 const getOpenMeeting = (privateRoomRecord) =>
@@ -297,7 +353,10 @@ const issueAuthToken = (host) =>
     { expiresIn: JWT_EXPIRES_IN },
   );
 
-const getHostById = (hostId) => readHosts().find((host) => host.id === hostId) || null;
+const getHostById = async (hostId) => {
+  const hosts = await readHosts();
+  return hosts.find((host) => host.id === hostId) || null;
+};
 
 const authMiddleware = (req, res, next) => {
   const authHeader = String(req.headers.authorization || '');
@@ -338,7 +397,7 @@ app.post('/api/hosts/signup', async (req, res) => {
     return;
   }
 
-  const hosts = readHosts();
+  const hosts = await readHosts();
   const existing = hosts.find((host) => host.email === email);
 
   if (existing) {
@@ -356,7 +415,7 @@ app.post('/api/hosts/signup', async (req, res) => {
   };
 
   hosts.push(newHost);
-  writeHosts(hosts);
+  await writeHosts(hosts);
 
   res.status(201).json({
     ok: true,
@@ -374,7 +433,7 @@ app.post('/api/hosts/login', async (req, res) => {
     return;
   }
 
-  const hosts = readHosts();
+  const hosts = await readHosts();
   const host = hosts.find((item) => item.email === email);
 
   if (!host) {
@@ -396,8 +455,8 @@ app.post('/api/hosts/login', async (req, res) => {
   });
 });
 
-app.get('/api/hosts/me', authMiddleware, (req, res) => {
-  const hosts = readHosts();
+app.get('/api/hosts/me', authMiddleware, async (req, res) => {
+  const hosts = await readHosts();
   const host = hosts.find((item) => item.id === req.auth.sub);
 
   if (!host) {
@@ -415,15 +474,15 @@ app.post('/api/hosts/logout', (_req, res) => {
   res.status(200).json({ ok: true });
 });
 
-app.get('/api/private-rooms', authMiddleware, (req, res) => {
-  const host = getHostById(req.auth.sub);
+app.get('/api/private-rooms', authMiddleware, async (req, res) => {
+  const host = await getHostById(req.auth.sub);
 
   if (!host) {
     res.status(401).json({ ok: false, error: 'Host account not found' });
     return;
   }
 
-  const privateRooms = readPrivateRooms()
+  const privateRooms = (await readPrivateRooms())
     .filter((room) => room.hostId === host.id)
     .map((room) => toPublicPrivateRoom(room));
 
@@ -431,7 +490,7 @@ app.get('/api/private-rooms', authMiddleware, (req, res) => {
 });
 
 app.post('/api/private-rooms', authMiddleware, async (req, res) => {
-  const host = getHostById(req.auth.sub);
+  const host = await getHostById(req.auth.sub);
 
   if (!host) {
     res.status(401).json({ ok: false, error: 'Host account not found' });
@@ -453,8 +512,8 @@ app.post('/api/private-rooms', authMiddleware, async (req, res) => {
     return;
   }
 
-  const privateRooms = readPrivateRooms();
-  const roomCode = createUniquePrivateRoomCode();
+  const privateRooms = await readPrivateRooms();
+  const roomCode = await createUniquePrivateRoomCode();
   const joinPasscodeHash = await bcrypt.hash(joinPasscode, BCRYPT_SALT_ROUNDS);
   const now = new Date().toISOString();
   const firstMeeting = {
@@ -482,7 +541,7 @@ app.post('/api/private-rooms', authMiddleware, async (req, res) => {
   };
 
   privateRooms.push(newPrivateRoom);
-  writePrivateRooms(privateRooms);
+  await writePrivateRooms(privateRooms);
   ensureRuntimeRoomFromPrivateRecord(newPrivateRoom);
 
   res.status(201).json({
@@ -491,8 +550,8 @@ app.post('/api/private-rooms', authMiddleware, async (req, res) => {
   });
 });
 
-app.post('/api/private-rooms/:privateRoomId/meetings', authMiddleware, (req, res) => {
-  const host = getHostById(req.auth.sub);
+app.post('/api/private-rooms/:privateRoomId/meetings', authMiddleware, async (req, res) => {
+  const host = await getHostById(req.auth.sub);
 
   if (!host) {
     res.status(401).json({ ok: false, error: 'Host account not found' });
@@ -507,7 +566,7 @@ app.post('/api/private-rooms/:privateRoomId/meetings', authMiddleware, (req, res
     return;
   }
 
-  const privateRooms = readPrivateRooms();
+  const privateRooms = await readPrivateRooms();
   const privateRoom = privateRooms.find((room) => room.id === privateRoomId);
 
   if (!privateRoom || privateRoom.hostId !== host.id) {
@@ -533,7 +592,7 @@ app.post('/api/private-rooms/:privateRoomId/meetings', authMiddleware, (req, res
   });
   privateRoom.updatedAt = now;
 
-  writePrivateRooms(privateRooms);
+  await writePrivateRooms(privateRooms);
   ensureRuntimeRoomFromPrivateRecord(privateRoom);
 
   res.status(201).json({
@@ -542,8 +601,8 @@ app.post('/api/private-rooms/:privateRoomId/meetings', authMiddleware, (req, res
   });
 });
 
-app.post('/api/private-rooms/:privateRoomId/close-meeting', authMiddleware, (req, res) => {
-  const host = getHostById(req.auth.sub);
+app.post('/api/private-rooms/:privateRoomId/close-meeting', authMiddleware, async (req, res) => {
+  const host = await getHostById(req.auth.sub);
 
   if (!host) {
     res.status(401).json({ ok: false, error: 'Host account not found' });
@@ -551,7 +610,7 @@ app.post('/api/private-rooms/:privateRoomId/close-meeting', authMiddleware, (req
   }
 
   const privateRoomId = String(req.params.privateRoomId || '').trim();
-  const privateRooms = readPrivateRooms();
+  const privateRooms = await readPrivateRooms();
   const privateRoom = privateRooms.find((room) => room.id === privateRoomId);
   const runtimeRoomId = privateRoom ? normalizeRoomId(privateRoom.roomCode) : '';
   const runtimeRoom = runtimeRoomId ? rooms.get(runtimeRoomId) : null;
@@ -575,7 +634,7 @@ app.post('/api/private-rooms/:privateRoomId/close-meeting', authMiddleware, (req
     runtimeRoom,
   });
   privateRoom.updatedAt = new Date().toISOString();
-  writePrivateRooms(privateRooms);
+  await writePrivateRooms(privateRooms);
 
   if (runtimeRoom) {
     io.to(runtimeRoomId).emit('room-closed', {
@@ -591,8 +650,8 @@ app.post('/api/private-rooms/:privateRoomId/close-meeting', authMiddleware, (req
   });
 });
 
-app.get('/api/private-rooms/:privateRoomId/participants', authMiddleware, (req, res) => {
-  const host = getHostById(req.auth.sub);
+app.get('/api/private-rooms/:privateRoomId/participants', authMiddleware, async (req, res) => {
+  const host = await getHostById(req.auth.sub);
 
   if (!host) {
     res.status(401).json({ ok: false, error: 'Host account not found' });
@@ -600,7 +659,7 @@ app.get('/api/private-rooms/:privateRoomId/participants', authMiddleware, (req, 
   }
 
   const privateRoomId = String(req.params.privateRoomId || '').trim();
-  const privateRoom = readPrivateRooms().find((room) => room.id === privateRoomId);
+  const privateRoom = (await readPrivateRooms()).find((room) => room.id === privateRoomId);
 
   if (!privateRoom || privateRoom.hostId !== host.id) {
     res.status(404).json({ ok: false, error: 'Private room not found' });
@@ -616,8 +675,8 @@ app.get('/api/private-rooms/:privateRoomId/participants', authMiddleware, (req, 
   });
 });
 
-app.post('/api/private-rooms/:privateRoomId/participants/ban', authMiddleware, (req, res) => {
-  const host = getHostById(req.auth.sub);
+app.post('/api/private-rooms/:privateRoomId/participants/ban', authMiddleware, async (req, res) => {
+  const host = await getHostById(req.auth.sub);
 
   if (!host) {
     res.status(401).json({ ok: false, error: 'Host account not found' });
@@ -633,7 +692,7 @@ app.post('/api/private-rooms/:privateRoomId/participants/ban', authMiddleware, (
     return;
   }
 
-  const privateRooms = readPrivateRooms();
+  const privateRooms = await readPrivateRooms();
   const privateRoom = privateRooms.find((room) => room.id === privateRoomId);
 
   if (!privateRoom || privateRoom.hostId !== host.id) {
@@ -646,7 +705,7 @@ app.post('/api/private-rooms/:privateRoomId/participants/ban', authMiddleware, (
     usernameLower,
   ]);
   privateRoom.updatedAt = new Date().toISOString();
-  writePrivateRooms(privateRooms);
+  await writePrivateRooms(privateRooms);
 
   const runtimeRoom = rooms.get(normalizeRoomId(privateRoom.roomCode));
   if (runtimeRoom) {
@@ -659,8 +718,8 @@ app.post('/api/private-rooms/:privateRoomId/participants/ban', authMiddleware, (
   });
 });
 
-app.post('/api/private-rooms/:privateRoomId/participants/unban', authMiddleware, (req, res) => {
-  const host = getHostById(req.auth.sub);
+app.post('/api/private-rooms/:privateRoomId/participants/unban', authMiddleware, async (req, res) => {
+  const host = await getHostById(req.auth.sub);
 
   if (!host) {
     res.status(401).json({ ok: false, error: 'Host account not found' });
@@ -676,7 +735,7 @@ app.post('/api/private-rooms/:privateRoomId/participants/unban', authMiddleware,
     return;
   }
 
-  const privateRooms = readPrivateRooms();
+  const privateRooms = await readPrivateRooms();
   const privateRoom = privateRooms.find((room) => room.id === privateRoomId);
 
   if (!privateRoom || privateRoom.hostId !== host.id) {
@@ -688,7 +747,7 @@ app.post('/api/private-rooms/:privateRoomId/participants/unban', authMiddleware,
     (item) => item !== usernameLower,
   );
   privateRoom.updatedAt = new Date().toISOString();
-  writePrivateRooms(privateRooms);
+  await writePrivateRooms(privateRooms);
 
   const runtimeRoom = rooms.get(normalizeRoomId(privateRoom.roomCode));
   if (runtimeRoom) {
@@ -701,8 +760,8 @@ app.post('/api/private-rooms/:privateRoomId/participants/unban', authMiddleware,
   });
 });
 
-app.get('/api/private-rooms/:privateRoomId/session-history', authMiddleware, (req, res) => {
-  const host = getHostById(req.auth.sub);
+app.get('/api/private-rooms/:privateRoomId/session-history', authMiddleware, async (req, res) => {
+  const host = await getHostById(req.auth.sub);
 
   if (!host) {
     res.status(401).json({ ok: false, error: 'Host account not found' });
@@ -710,7 +769,7 @@ app.get('/api/private-rooms/:privateRoomId/session-history', authMiddleware, (re
   }
 
   const privateRoomId = String(req.params.privateRoomId || '').trim();
-  const privateRoom = readPrivateRooms().find((room) => room.id === privateRoomId);
+  const privateRoom = (await readPrivateRooms()).find((room) => room.id === privateRoomId);
 
   if (!privateRoom || privateRoom.hostId !== host.id) {
     res.status(404).json({ ok: false, error: 'Private room not found' });
@@ -725,8 +784,8 @@ app.get('/api/private-rooms/:privateRoomId/session-history', authMiddleware, (re
   });
 });
 
-app.get('/api/private-rooms/:privateRoomId/exports', authMiddleware, (req, res) => {
-  const host = getHostById(req.auth.sub);
+app.get('/api/private-rooms/:privateRoomId/exports', authMiddleware, async (req, res) => {
+  const host = await getHostById(req.auth.sub);
 
   if (!host) {
     res.status(401).json({ ok: false, error: 'Host account not found' });
@@ -735,7 +794,7 @@ app.get('/api/private-rooms/:privateRoomId/exports', authMiddleware, (req, res) 
 
   const privateRoomId = String(req.params.privateRoomId || '').trim();
   const format = String(req.query.format || 'json').trim().toLowerCase();
-  const privateRoom = readPrivateRooms().find((room) => room.id === privateRoomId);
+  const privateRoom = (await readPrivateRooms()).find((room) => room.id === privateRoomId);
 
   if (!privateRoom || privateRoom.hostId !== host.id) {
     res.status(404).json({ ok: false, error: 'Private room not found' });
@@ -818,8 +877,8 @@ const generateCode = (length) => {
   }).join('');
 };
 
-const createUniqueRoomId = () => {
-  const privateRoomCodes = new Set(readPrivateRooms().map((room) => room.roomCode));
+const createUniqueRoomId = async () => {
+  const privateRoomCodes = new Set((await readPrivateRooms()).map((room) => room.roomCode));
   let roomId = generateCode(ROOM_ID_LENGTH);
 
   while (rooms.has(roomId) || privateRoomCodes.has(roomId)) {
@@ -829,8 +888,8 @@ const createUniqueRoomId = () => {
   return roomId;
 };
 
-const createUniquePrivateRoomCode = () => {
-  const privateRooms = readPrivateRooms();
+const createUniquePrivateRoomCode = async () => {
+  const privateRooms = await readPrivateRooms();
   let roomCode = generateCode(PRIVATE_ROOM_CODE_LENGTH);
 
   while (
@@ -976,6 +1035,13 @@ const ensureRuntimeRoomFromPrivateRecord = (privateRoomRecord) => {
   return room;
 };
 
+const hydrateRuntimeRoomsFromPrivateRooms = async () => {
+  const privateRooms = await readPrivateRooms();
+  privateRooms.forEach((privateRoom) => {
+    ensureRuntimeRoomFromPrivateRecord(privateRoom);
+  });
+};
+
 const scheduleRoomCleanup = (roomId) => {
   clearRoomCleanupTimer(roomId);
 
@@ -1039,7 +1105,7 @@ const isHostActor = (room, socket) => {
   return room.hostUsername === socket.data.username;
 };
 
-const leaveCurrentRoom = (socket, options = {}) => {
+const leaveCurrentRoom = async (socket, options = {}) => {
   const explicitLeave = Boolean(options.explicitLeave);
   const roomId = socket.data.roomId;
 
@@ -1053,7 +1119,7 @@ const leaveCurrentRoom = (socket, options = {}) => {
   // If host intentionally leaves via "Leave Room", close room for everyone immediately.
   if (explicitLeave && isHostActor(room, socket)) {
     if (room.roomType === 'private' && room.privateRoomId) {
-      const privateRooms = readPrivateRooms();
+      const privateRooms = await readPrivateRooms();
       const privateRoom = privateRooms.find((item) => item.id === room.privateRoomId);
       const activeMeetingBeforeClose = privateRoom ? getOpenMeeting(privateRoom) : null;
 
@@ -1066,7 +1132,7 @@ const leaveCurrentRoom = (socket, options = {}) => {
             runtimeRoom: room,
           });
           privateRoom.updatedAt = new Date().toISOString();
-          writePrivateRooms(privateRooms);
+          await writePrivateRooms(privateRooms);
         }
       }
     }
@@ -1114,7 +1180,7 @@ const leaveCurrentRoom = (socket, options = {}) => {
 };
 
 io.on('connection', (socket) => {
-  socket.on('create-room', (payload, ack) => {
+  socket.on('create-room', async (payload, ack) => {
     const requestedRoomId = normalizeRoomId(payload?.roomId);
     const hostUsername = normalizeUsername(payload?.username);
     let roomId = requestedRoomId;
@@ -1141,14 +1207,14 @@ io.on('connection', (socket) => {
         return;
       }
 
-      if (readPrivateRooms().some((room) => room.roomCode === requestedRoomId)) {
+      if ((await readPrivateRooms()).some((room) => room.roomCode === requestedRoomId)) {
         if (typeof ack === 'function') {
           ack({ ok: false, error: 'Room code reserved by a private room' });
         }
         return;
       }
     } else {
-      roomId = createUniqueRoomId();
+      roomId = await createUniqueRoomId();
     }
 
     rooms.set(
@@ -1165,7 +1231,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('join-room', (payload, ack) => {
+  socket.on('join-room', async (payload, ack) => {
     const requestedRoomId = normalizeRoomId(payload?.roomId);
     const username = normalizeUsername(payload?.username);
     const joinPasscode = String(payload?.joinPasscode || '');
@@ -1195,7 +1261,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const privateRoomRecord = readPrivateRooms().find(
+    const privateRoomRecord = (await readPrivateRooms()).find(
       (room) => normalizeRoomId(room.roomCode) === requestedRoomId,
     );
     const roomId = privateRoomRecord
@@ -1236,7 +1302,7 @@ io.on('connection', (socket) => {
     }
 
     if (socket.data.roomId && socket.data.roomId !== roomId) {
-      leaveCurrentRoom(socket);
+      await leaveCurrentRoom(socket);
     }
 
     const room = rooms.get(roomId);
@@ -1257,7 +1323,7 @@ io.on('connection', (socket) => {
         room.hostUsername = privateRoomRecord.hostDisplayName || privateRoomRecord.hostName || 'Host';
       }
 
-      const privateRooms = readPrivateRooms();
+      const privateRooms = await readPrivateRooms();
       const persistedRoom = privateRooms.find((item) => item.id === privateRoomRecord.id);
       const activeMeeting = persistedRoom ? getOpenMeeting(persistedRoom) : null;
 
@@ -1280,7 +1346,7 @@ io.on('connection', (socket) => {
         }
 
         persistedRoom.updatedAt = now;
-        writePrivateRooms(privateRooms);
+        await writePrivateRooms(privateRooms);
       }
     }
     if (room.bannedUsernames.has(normalizedUsernameKey)) {
@@ -1393,7 +1459,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('remove-participant', (payload, ack) => {
+  socket.on('remove-participant', async (payload, ack) => {
     const roomId = normalizeRoomId(payload?.roomId || socket.data.roomId);
     const targetUsername = normalizeUsername(payload?.targetUsername);
     const requesterUsername = normalizeUsername(socket.data.username);
@@ -1438,7 +1504,7 @@ io.on('connection', (socket) => {
     room.bannedUsernames.add(usernameKey(targetUsername));
 
     if (room.roomType === 'private' && room.privateRoomId) {
-      const privateRooms = readPrivateRooms();
+      const privateRooms = await readPrivateRooms();
       const privateRoom = privateRooms.find((item) => item.id === room.privateRoomId);
 
       if (privateRoom) {
@@ -1447,7 +1513,7 @@ io.on('connection', (socket) => {
           usernameKey(targetUsername),
         ]);
         privateRoom.updatedAt = new Date().toISOString();
-        writePrivateRooms(privateRooms);
+        await writePrivateRooms(privateRooms);
       }
     }
 
@@ -1462,7 +1528,7 @@ io.on('connection', (socket) => {
         targetSocket.emit('participant-removed', {
           message: `You were removed by host from room ${roomId}.`,
         });
-        leaveCurrentRoom(targetSocket, { explicitLeave: false });
+        await leaveCurrentRoom(targetSocket, { explicitLeave: false });
       }
     }
 
@@ -1529,15 +1595,27 @@ io.on('connection', (socket) => {
   });
 
   socket.on('leave-room', () => {
-    leaveCurrentRoom(socket, { explicitLeave: true });
+    void leaveCurrentRoom(socket, { explicitLeave: true });
   });
 
   socket.on('disconnect', () => {
-    leaveCurrentRoom(socket, { explicitLeave: false });
+    void leaveCurrentRoom(socket, { explicitLeave: false });
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-  console.log(`Allowed frontend origins: ${allowedOrigins.join(', ')}`);
+const bootstrap = async () => {
+  await initializeDatabase();
+  await migrateLegacyJsonIfNeeded();
+  await hydrateRuntimeRoomsFromPrivateRooms();
+
+  server.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+    console.log(`Allowed frontend origins: ${allowedOrigins.join(', ')}`);
+    console.log(`MongoDB database: ${db.databaseName}`);
+  });
+};
+
+bootstrap().catch((error) => {
+  console.error('Failed to start server:', error);
+  process.exit(1);
 });
