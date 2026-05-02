@@ -1020,10 +1020,6 @@ const leaveCurrentRoom = async (socket, options = {}) => {
   } else {
     clearRoomCleanupTimer(roomId);
 
-    if (room.roomType !== 'private' && room.hostUsername === leavingUsername) {
-      room.hostUsername = room.users[0].username;
-    }
-
     emitUsersUpdate(roomId);
     emitRoomState(roomId);
   }

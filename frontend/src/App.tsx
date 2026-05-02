@@ -505,7 +505,9 @@ function App() {
 
     const handleConnectError = () => {
       setConnected(false);
-      setErrorMessage('Unable to connect to backend. Check VITE_BACKEND_URL and backend deployment health.');
+      setErrorMessage(
+        `Unable to connect to backend (${BACKEND_URL || 'same-origin'}). Check VITE_BACKEND_URL and backend deployment health.`,
+      );
     };
 
     const handleUsersUpdate = (nextUsers: string[]) => {
