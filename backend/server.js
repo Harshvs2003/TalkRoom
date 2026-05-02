@@ -5,6 +5,7 @@ const { Server } = require('socket.io');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const PDFDocument = require('pdfkit');
 const Y = require('yjs');
 const config = require('./src/config');
 const { initializeDatabase } = require('./src/db');
@@ -648,6 +649,7 @@ app.get('/api/private-rooms/:privateRoomId/exports', authMiddleware, async (req,
 
   const privateRoomId = String(req.params.privateRoomId || '').trim();
   const format = String(req.query.format || 'json').trim().toLowerCase();
+  const meetingId = String(req.query.meetingId || '').trim();
   const privateRoom = (await readPrivateRooms()).find((room) => room.id === privateRoomId);
 
   if (!privateRoom || privateRoom.hostId !== host.id) {
@@ -655,13 +657,34 @@ app.get('/api/private-rooms/:privateRoomId/exports', authMiddleware, async (req,
     return;
   }
 
+  const allMeetings = Array.isArray(privateRoom.meetings) ? privateRoom.meetings : [];
+  const exportMeetings = meetingId
+    ? allMeetings.filter((meeting) => meeting.id === meetingId)
+    : allMeetings;
+  const exportSnapshots = Array.isArray(privateRoom.sessionHistory)
+    ? (meetingId
+      ? privateRoom.sessionHistory.filter((snapshot) => snapshot.meetingId === meetingId)
+      : privateRoom.sessionHistory)
+    : [];
+
+  if (meetingId && exportMeetings.length === 0) {
+    res.status(404).json({ ok: false, error: 'Meeting not found for export' });
+    return;
+  }
+
+  const exportRoom = {
+    ...privateRoom,
+    meetings: exportMeetings,
+    sessionHistory: exportSnapshots,
+  };
+
   if (format === 'json') {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename=\"${privateRoom.roomCode}-export.json\"`);
+    res.setHeader('Content-Disposition', `attachment; filename=\"${privateRoom.roomCode}${meetingId ? `-${meetingId}` : ''}-export.json\"`);
     res.status(200).send(
       JSON.stringify(
         {
-          room: toPublicPrivateRoom(privateRoom),
+          room: toPublicPrivateRoom(exportRoom),
         },
         null,
         2,
@@ -674,12 +697,12 @@ app.get('/api/private-rooms/:privateRoomId/exports', authMiddleware, async (req,
     const rows = [];
     rows.push(['roomCode', 'meetingName', 'meetingStatus', 'participant', 'joinCount', 'firstJoinedAt', 'lastJoinedAt'].join(','));
 
-    (privateRoom.meetings || []).forEach((meeting) => {
+    (exportRoom.meetings || []).forEach((meeting) => {
       const participants = Array.isArray(meeting.participants) ? meeting.participants : [];
 
       if (participants.length === 0) {
         rows.push([
-          privateRoom.roomCode,
+          exportRoom.roomCode,
           `"${String(meeting.name || '').replace(/\"/g, '\"\"')}"`,
           meeting.status || '',
           '',
@@ -692,7 +715,7 @@ app.get('/api/private-rooms/:privateRoomId/exports', authMiddleware, async (req,
 
       participants.forEach((participant) => {
         rows.push([
-          privateRoom.roomCode,
+          exportRoom.roomCode,
           `"${String(meeting.name || '').replace(/\"/g, '\"\"')}"`,
           meeting.status || '',
           `"${String(participant.username || '').replace(/\"/g, '\"\"')}"`,
@@ -704,12 +727,144 @@ app.get('/api/private-rooms/:privateRoomId/exports', authMiddleware, async (req,
     });
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename=\"${privateRoom.roomCode}-export.csv\"`);
+    res.setHeader('Content-Disposition', `attachment; filename=\"${privateRoom.roomCode}${meetingId ? `-${meetingId}` : ''}-export.csv\"`);
     res.status(200).send(rows.join('\n'));
     return;
   }
 
-  res.status(400).json({ ok: false, error: 'Unsupported export format. Use json or csv.' });
+  if (format === 'pdf') {
+    const safeSlug = String(privateRoom.workspaceName || 'meeting-export')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60) || 'meeting-export';
+    const meetingSlug = meetingId ? `-${meetingId.slice(0, 8)}` : '';
+    const filename = `${safeSlug}${meetingSlug}.pdf`;
+    const participants = aggregateParticipants(exportRoom);
+    const sessionHistory = Array.isArray(exportRoom.sessionHistory) ? exportRoom.sessionHistory : [];
+    const meetings = (exportRoom.meetings || []).slice().sort((a, b) => {
+      const aTime = new Date(a.startedAt || 0).getTime();
+      const bTime = new Date(b.startedAt || 0).getTime();
+      return aTime - bTime;
+    });
+    const hostName = privateRoom.hostDisplayName || privateRoom.hostName || 'Host';
+
+    const formatWhen = (value) => {
+      if (!value) {
+        return 'N/A';
+      }
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return 'N/A';
+      }
+      return date.toLocaleString();
+    };
+
+    const cleanDocText = (value) => String(value || '').replace(/\r\n/g, '\n');
+    const addSectionTitle = (doc, text) => {
+      doc.moveDown(0.7);
+      doc.font('Helvetica-Bold').fontSize(13).text(text);
+      doc.moveDown(0.25);
+    };
+    const ensureSpace = (doc, minSpace = 80) => {
+      if (doc.y > doc.page.height - doc.page.margins.bottom - minSpace) {
+        doc.addPage();
+      }
+    };
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=\"${filename}\"`);
+
+    const doc = new PDFDocument({
+      size: 'A4',
+      margins: { top: 50, bottom: 50, left: 50, right: 50 },
+      info: {
+        Title: `${privateRoom.workspaceName || 'Meeting Export'} Export`,
+        Author: hostName,
+      },
+    });
+
+    doc.pipe(res);
+
+    meetings.forEach((meeting, index) => {
+      if (index > 0) {
+        doc.addPage();
+      }
+
+      doc.font('Helvetica-Bold').fontSize(18).text(meeting.name || 'Meeting');
+      doc.moveDown(0.35);
+      doc.font('Helvetica').fontSize(11);
+      doc.text(`Host: ${hostName}`);
+      doc.text(`Started: ${formatWhen(meeting.startedAt)}`);
+      doc.text(`Closed: ${meeting.closedAt ? formatWhen(meeting.closedAt) : 'Still open'}`);
+      doc.text(`Status: ${meeting.status || 'unknown'}`);
+
+      const snapshot = sessionHistory.find((item) => item.meetingId === meeting.id) || null;
+      if (snapshot) {
+        doc.text(`Snapshot captured: ${formatWhen(snapshot.capturedAt)}`);
+      }
+
+      const docs = snapshot && Array.isArray(snapshot.docs) ? snapshot.docs.slice() : [];
+      docs.sort((a, b) => {
+        if (a.type === b.type) {
+          return String(a.name || '').localeCompare(String(b.name || ''));
+        }
+        return a.type === 'shared' ? -1 : 1;
+      });
+
+      addSectionTitle(doc, 'Written Content');
+
+      if (docs.length === 0) {
+        doc.font('Helvetica-Oblique').fontSize(11).text('No captured document snapshot found for this meeting.');
+      } else {
+        docs.forEach((meetingDoc) => {
+          ensureSpace(doc, 120);
+          doc.font('Helvetica-Bold').fontSize(12).text(
+            `${meetingDoc.type === 'shared' ? 'Shared Screen' : 'Personal Card'}: ${meetingDoc.name || 'Untitled'}`,
+          );
+          if (meetingDoc.ownerUsername) {
+            doc.font('Helvetica').fontSize(10).text(`Owner: ${meetingDoc.ownerUsername}`);
+          }
+          doc.moveDown(0.2);
+
+          const text = cleanDocText(meetingDoc.text);
+          if (!text.trim()) {
+            doc.font('Helvetica-Oblique').fontSize(11).text('(No text content)');
+          } else {
+            // Preserve line breaks and spacing from the editor content.
+            text.split('\n').forEach((line) => {
+              doc.font('Helvetica').fontSize(11).text(line.length ? line : ' ');
+            });
+          }
+          doc.moveDown(0.55);
+        });
+      }
+    });
+
+    doc.addPage();
+    doc.font('Helvetica-Bold').fontSize(16).text('Participants');
+    doc.moveDown(0.5);
+
+    if (participants.length === 0) {
+      doc.font('Helvetica-Oblique').fontSize(11).text('No participants recorded yet.');
+    } else {
+      participants.forEach((participant, index) => {
+        ensureSpace(doc, 65);
+        doc.font('Helvetica-Bold').fontSize(11).text(`${index + 1}. ${participant.username}`);
+        doc.font('Helvetica').fontSize(10);
+        doc.text(`Meetings joined: ${participant.meetingsJoined}`);
+        doc.text(`Total joins: ${participant.totalJoinCount}`);
+        doc.text(`First joined: ${formatWhen(participant.firstJoinedAt)}`);
+        doc.text(`Last joined: ${formatWhen(participant.lastJoinedAt)}`);
+        doc.moveDown(0.45);
+      });
+    }
+
+    doc.end();
+    return;
+  }
+
+  res.status(400).json({ ok: false, error: 'Unsupported export format. Use json, csv, or pdf.' });
 });
 
 const io = new Server(server, {

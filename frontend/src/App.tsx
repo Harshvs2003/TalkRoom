@@ -229,6 +229,7 @@ function App() {
   const [newMeetingNameInput, setNewMeetingNameInput] = useState('');
   const [hostDashboardTab, setHostDashboardTab] = useState<HostDashboardTab>('create_private_room');
   const [selectedPrivateRoomId, setSelectedPrivateRoomId] = useState('');
+  const [selectedExportMeetingId, setSelectedExportMeetingId] = useState('');
   const [participantsStatus, setParticipantsStatus] = useState<ParticipantStatus[]>([]);
   const [participantsStatusLoading, setParticipantsStatusLoading] = useState(false);
   const [sessionHistory, setSessionHistory] = useState<SessionSnapshot[]>([]);
@@ -731,6 +732,10 @@ function App() {
     () => privateRooms.find((room) => room.id === selectedPrivateRoomId) || null,
     [privateRooms, selectedPrivateRoomId],
   );
+  const selectedExportSnapshot = useMemo(
+    () => sessionHistory.find((snapshot) => snapshot.meetingId === selectedExportMeetingId) || null,
+    [selectedExportMeetingId, sessionHistory],
+  );
 
   const hostDashboardTabs = useMemo(
     () => [
@@ -1219,20 +1224,20 @@ function App() {
   );
 
   const handleExportData = useCallback(
-    async (format: 'json' | 'csv' | 'pdf') => {
+    async (format: 'json' | 'csv' | 'pdf', meetingId?: string) => {
       if (!selectedPrivateRoomId || !selectedPrivateRoom) {
         setHostAuthMessage('Choose a private room first.');
         return;
       }
 
-      if (format === 'pdf') {
-        setHostAuthMessage('PDF export is queued next. JSON and CSV exports are ready now.');
-        return;
-      }
-
       try {
+        const query = new URLSearchParams({ format });
+        if (meetingId) {
+          query.set('meetingId', meetingId);
+        }
+
         const response = await fetch(
-          `${BACKEND_URL}/api/private-rooms/${selectedPrivateRoomId}/exports?format=${format}`,
+          `${BACKEND_URL}/api/private-rooms/${selectedPrivateRoomId}/exports?${query.toString()}`,
           {
             headers: {
               ...(hostToken ? { Authorization: `Bearer ${hostToken}` } : {}),
@@ -1246,7 +1251,8 @@ function App() {
         }
 
         const blob = await response.blob();
-        const fileName = `${selectedPrivateRoom.roomCode}-export.${format}`;
+        const meetingSuffix = meetingId ? `-${meetingId.slice(0, 8)}` : '';
+        const fileName = `${selectedPrivateRoom.roomCode}${meetingSuffix}-export.${format}`;
         const url = window.URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
@@ -1255,7 +1261,7 @@ function App() {
         link.click();
         link.remove();
         window.URL.revokeObjectURL(url);
-        setHostAuthMessage(`${format.toUpperCase()} export downloaded.`);
+        setHostAuthMessage(`${format.toUpperCase()} export downloaded${meetingId ? ' for selected meeting' : ''}.`);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Could not export data';
         setHostAuthMessage(message);
@@ -1289,8 +1295,45 @@ function App() {
     [isHost, joinedRoomId],
   );
 
-  const goHome = useCallback(() => {
-    socketRef.current?.emit('leave-room');
+  const goHome = useCallback(async () => {
+    const roomId = joinedRoomId.trim();
+    const currentUsername = username.trim();
+    const isPrivateRoom = roomState?.roomType === 'private';
+    const isPrivateHost = Boolean(
+      isPrivateRoom &&
+      hostProfile?.id &&
+      roomState?.hostOwnerId === hostProfile.id,
+    );
+
+    if (isPrivateHost) {
+      const shouldClose = window.confirm(
+        'Do you want to leave and close this meeting now? This will save a snapshot automatically.',
+      );
+
+      if (!shouldClose) {
+        return;
+      }
+
+      const matchingPrivateRoom = privateRooms.find((room) => room.roomCode === roomId);
+      if (!matchingPrivateRoom) {
+        setErrorMessage('Could not find private room record to close this meeting.');
+        return;
+      }
+
+      try {
+        await hostApiRequest(`/api/private-rooms/${matchingPrivateRoom.id}/close-meeting`, {
+          method: 'POST',
+        });
+        setStatusMessage('Meeting closed and snapshot saved.');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Could not close meeting';
+        setErrorMessage(message);
+        return;
+      }
+    } else {
+      socketRef.current?.emit('leave-room');
+    }
+
     destroyAllDocs();
     sessionStorage.removeItem(LAST_ROOM_KEY);
     sessionStorage.removeItem(LAST_ROOM_PASSCODE_KEY);
@@ -1299,14 +1342,24 @@ function App() {
     setJoinedRoomId('');
     setUsers([]);
     setRoomState(null);
-    setStatusMessage('');
+    setStatusMessage((prev) => prev || (currentUsername ? `${currentUsername} left the room.` : ''));
     setErrorMessage('');
-  }, [destroyAllDocs]);
+  }, [
+    destroyAllDocs,
+    hostApiRequest,
+    hostProfile?.id,
+    joinedRoomId,
+    privateRooms,
+    roomState?.hostOwnerId,
+    roomState?.roomType,
+    username,
+  ]);
 
   useEffect(() => {
     if (!hostProfile || !selectedPrivateRoomId) {
       setParticipantsStatus([]);
       setSessionHistory([]);
+      setSelectedExportMeetingId('');
       return;
     }
 
@@ -1314,7 +1367,7 @@ function App() {
       fetchParticipantsStatus(selectedPrivateRoomId);
     }
 
-    if (hostDashboardTab === 'session_history') {
+    if (hostDashboardTab === 'session_history' || hostDashboardTab === 'exports') {
       fetchSessionHistory(selectedPrivateRoomId);
     }
   }, [
@@ -1710,12 +1763,88 @@ function App() {
                   {hostDashboardTab === 'exports' ? (
                     <div className="rounded-xl border border-slate-200 bg-white p-4">
                       <p className="mb-2 text-sm font-semibold text-slate-700">Exports</p>
-                      <p className="mb-3 text-xs text-slate-500">Export meeting, participant and session data for this private room code.</p>
-                      <div className="flex flex-wrap gap-2">
-                        <button type="button" onClick={() => handleExportData('json')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export JSON</button>
-                        <button type="button" onClick={() => handleExportData('csv')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export CSV</button>
-                        <button type="button" onClick={() => handleExportData('pdf')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export PDF</button>
+                      <p className="mb-3 text-xs text-slate-500">Export all meetings together or open a specific meeting snapshot and export only that meeting.</p>
+                      <div className="mb-4 flex flex-wrap gap-2">
+                        <button type="button" onClick={() => handleExportData('json')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export All JSON</button>
+                        <button type="button" onClick={() => handleExportData('csv')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export All CSV</button>
+                        <button type="button" onClick={() => handleExportData('pdf')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export All PDF</button>
                       </div>
+
+                      {!selectedPrivateRoom ? (
+                        <p className="text-xs text-slate-500">Select a private room.</p>
+                      ) : (
+                        <div className="space-y-3">
+                          <div className="rounded-md border border-slate-200">
+                            {(selectedPrivateRoom.meetings || []).length === 0 ? (
+                              <p className="p-3 text-xs text-slate-500">No meetings yet.</p>
+                            ) : (
+                              <ul className="divide-y divide-slate-200">
+                                {selectedPrivateRoom.meetings
+                                  .slice()
+                                  .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+                                  .map((meeting) => (
+                                    <li key={meeting.id} className="p-3">
+                                      <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <div>
+                                          <p className="text-xs font-semibold text-slate-700">{meeting.name}</p>
+                                          <p className="text-[11px] text-slate-500">Started: {new Date(meeting.startedAt).toLocaleString()}</p>
+                                        </div>
+                                        <div className="flex flex-wrap gap-2">
+                                          <button
+                                            type="button"
+                                            onClick={() => setSelectedExportMeetingId(meeting.id)}
+                                            className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                                          >
+                                            Open
+                                          </button>
+                                          <button type="button" onClick={() => handleExportData('json', meeting.id)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">JSON</button>
+                                          <button type="button" onClick={() => handleExportData('csv', meeting.id)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">CSV</button>
+                                          <button type="button" onClick={() => handleExportData('pdf', meeting.id)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">PDF</button>
+                                        </div>
+                                      </div>
+                                    </li>
+                                  ))}
+                              </ul>
+                            )}
+                          </div>
+
+                          {selectedExportMeetingId ? (
+                            <div className="rounded-md border border-slate-200 p-3">
+                              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                <p className="text-xs font-semibold text-slate-700">Meeting Snapshot Preview</p>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedExportMeetingId('')}
+                                  className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                                >
+                                  Close Preview
+                                </button>
+                              </div>
+                              {!selectedExportSnapshot ? (
+                                <p className="text-xs text-slate-500">Snapshot not captured yet. Close the meeting to generate automatic snapshot.</p>
+                              ) : (
+                                <div className="space-y-2">
+                                  <p className="text-[11px] text-slate-500">Captured: {new Date(selectedExportSnapshot.capturedAt).toLocaleString()}</p>
+                                  <p className="text-[11px] text-slate-500">Active users: {selectedExportSnapshot.activeUsers.join(', ') || 'None'}</p>
+                                  <div className="max-h-72 space-y-2 overflow-auto rounded border border-slate-200 bg-slate-50 p-2">
+                                    {selectedExportSnapshot.docs.map((doc) => (
+                                      <div key={doc.docId} className="rounded border border-slate-200 bg-white p-2">
+                                        <p className="text-xs font-semibold text-slate-700">{doc.name} ({doc.type})</p>
+                                        <pre className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{doc.text || '(No text)'}</pre>
+                                      </div>
+                                    ))}
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    <button type="button" onClick={() => handleExportData('json', selectedExportMeetingId)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export This JSON</button>
+                                    <button type="button" onClick={() => handleExportData('csv', selectedExportMeetingId)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export This CSV</button>
+                                    <button type="button" onClick={() => handleExportData('pdf', selectedExportMeetingId)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export This PDF</button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
+                      )}
                     </div>
                   ) : null}
                 </div>
