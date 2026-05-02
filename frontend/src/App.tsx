@@ -1224,7 +1224,7 @@ function App() {
   );
 
   const handleExportData = useCallback(
-    async (format: 'json' | 'csv' | 'pdf', meetingId?: string) => {
+    async (format: 'json' | 'csv' | 'pdf' | 'docx', meetingId?: string) => {
       if (!selectedPrivateRoomId || !selectedPrivateRoom) {
         setHostAuthMessage('Choose a private room first.');
         return;
@@ -1768,6 +1768,7 @@ function App() {
                         <button type="button" onClick={() => handleExportData('json')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export All JSON</button>
                         <button type="button" onClick={() => handleExportData('csv')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export All CSV</button>
                         <button type="button" onClick={() => handleExportData('pdf')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export All PDF</button>
+                        <button type="button" onClick={() => handleExportData('docx')} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export All Word</button>
                       </div>
 
                       {!selectedPrivateRoom ? (
@@ -1792,57 +1793,48 @@ function App() {
                                         <div className="flex flex-wrap gap-2">
                                           <button
                                             type="button"
-                                            onClick={() => setSelectedExportMeetingId(meeting.id)}
+                                            onClick={() => setSelectedExportMeetingId(selectedExportMeetingId === meeting.id ? '' : meeting.id)}
                                             className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
                                           >
-                                            Open
+                                            {selectedExportMeetingId === meeting.id ? 'Hide' : 'Open'}
                                           </button>
                                           <button type="button" onClick={() => handleExportData('json', meeting.id)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">JSON</button>
                                           <button type="button" onClick={() => handleExportData('csv', meeting.id)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">CSV</button>
                                           <button type="button" onClick={() => handleExportData('pdf', meeting.id)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">PDF</button>
+                                          <button type="button" onClick={() => handleExportData('docx', meeting.id)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Word</button>
                                         </div>
                                       </div>
+                                      {selectedExportMeetingId === meeting.id ? (
+                                        <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+                                          {!selectedExportSnapshot ? (
+                                            <p className="text-xs text-slate-500">Snapshot not captured yet. Close the meeting to generate automatic snapshot.</p>
+                                          ) : (
+                                            <div className="space-y-2">
+                                              <p className="text-[11px] text-slate-500">Captured: {new Date(selectedExportSnapshot.capturedAt).toLocaleString()}</p>
+                                              <p className="text-[11px] text-slate-500">Active users: {selectedExportSnapshot.activeUsers.join(', ') || 'None'}</p>
+                                              <div className="max-h-72 space-y-2 overflow-auto rounded border border-slate-200 bg-white p-2">
+                                                {selectedExportSnapshot.docs.map((doc) => (
+                                                  <div key={doc.docId} className="rounded border border-slate-200 bg-white p-2">
+                                                    <p className="text-xs font-semibold text-slate-700">{doc.name} ({doc.type})</p>
+                                                    <pre className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{doc.text || '(No text)'}</pre>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                              <div className="flex flex-wrap gap-2">
+                                                <button type="button" onClick={() => handleExportData('json', meeting.id)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export This JSON</button>
+                                                <button type="button" onClick={() => handleExportData('csv', meeting.id)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export This CSV</button>
+                                                <button type="button" onClick={() => handleExportData('pdf', meeting.id)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export This PDF</button>
+                                                <button type="button" onClick={() => handleExportData('docx', meeting.id)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export This Word</button>
+                                              </div>
+                                            </div>
+                                          )}
+                                        </div>
+                                      ) : null}
                                     </li>
                                   ))}
                               </ul>
                             )}
                           </div>
-
-                          {selectedExportMeetingId ? (
-                            <div className="rounded-md border border-slate-200 p-3">
-                              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                                <p className="text-xs font-semibold text-slate-700">Meeting Snapshot Preview</p>
-                                <button
-                                  type="button"
-                                  onClick={() => setSelectedExportMeetingId('')}
-                                  className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
-                                >
-                                  Close Preview
-                                </button>
-                              </div>
-                              {!selectedExportSnapshot ? (
-                                <p className="text-xs text-slate-500">Snapshot not captured yet. Close the meeting to generate automatic snapshot.</p>
-                              ) : (
-                                <div className="space-y-2">
-                                  <p className="text-[11px] text-slate-500">Captured: {new Date(selectedExportSnapshot.capturedAt).toLocaleString()}</p>
-                                  <p className="text-[11px] text-slate-500">Active users: {selectedExportSnapshot.activeUsers.join(', ') || 'None'}</p>
-                                  <div className="max-h-72 space-y-2 overflow-auto rounded border border-slate-200 bg-slate-50 p-2">
-                                    {selectedExportSnapshot.docs.map((doc) => (
-                                      <div key={doc.docId} className="rounded border border-slate-200 bg-white p-2">
-                                        <p className="text-xs font-semibold text-slate-700">{doc.name} ({doc.type})</p>
-                                        <pre className="mt-1 whitespace-pre-wrap text-[11px] text-slate-600">{doc.text || '(No text)'}</pre>
-                                      </div>
-                                    ))}
-                                  </div>
-                                  <div className="flex flex-wrap gap-2">
-                                    <button type="button" onClick={() => handleExportData('json', selectedExportMeetingId)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export This JSON</button>
-                                    <button type="button" onClick={() => handleExportData('csv', selectedExportMeetingId)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export This CSV</button>
-                                    <button type="button" onClick={() => handleExportData('pdf', selectedExportMeetingId)} className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Export This PDF</button>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          ) : null}
                         </div>
                       )}
                     </div>

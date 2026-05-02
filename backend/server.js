@@ -6,6 +6,15 @@ const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const PDFDocument = require('pdfkit');
+const {
+  Document,
+  Packer,
+  Paragraph,
+  TextRun,
+  HeadingLevel,
+  AlignmentType,
+  PageBreak,
+} = require('docx');
 const Y = require('yjs');
 const config = require('./src/config');
 const { initializeDatabase } = require('./src/db');
@@ -864,7 +873,135 @@ app.get('/api/private-rooms/:privateRoomId/exports', authMiddleware, async (req,
     return;
   }
 
-  res.status(400).json({ ok: false, error: 'Unsupported export format. Use json, csv, or pdf.' });
+  if (format === 'docx') {
+    const safeSlug = String(privateRoom.workspaceName || 'meeting-export')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60) || 'meeting-export';
+    const meetingSlug = meetingId ? `-${meetingId.slice(0, 8)}` : '';
+    const filename = `${safeSlug}${meetingSlug}.docx`;
+    const participants = aggregateParticipants(exportRoom);
+    const sessionHistory = Array.isArray(exportRoom.sessionHistory) ? exportRoom.sessionHistory : [];
+    const meetings = (exportRoom.meetings || []).slice().sort((a, b) => {
+      const aTime = new Date(a.startedAt || 0).getTime();
+      const bTime = new Date(b.startedAt || 0).getTime();
+      return aTime - bTime;
+    });
+    const hostName = privateRoom.hostDisplayName || privateRoom.hostName || 'Host';
+
+    const formatWhen = (value) => {
+      if (!value) {
+        return 'N/A';
+      }
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return 'N/A';
+      }
+      return date.toLocaleString();
+    };
+    const cleanDocText = (value) => String(value || '').replace(/\r\n/g, '\n');
+
+    const paragraphs = [];
+
+    meetings.forEach((meeting, index) => {
+      paragraphs.push(
+        new Paragraph({
+          heading: HeadingLevel.HEADING_1,
+          children: [new TextRun(meeting.name || 'Meeting')],
+        }),
+        new Paragraph(`Host: ${hostName}`),
+        new Paragraph(`Started: ${formatWhen(meeting.startedAt)}`),
+        new Paragraph(`Closed: ${meeting.closedAt ? formatWhen(meeting.closedAt) : 'Still open'}`),
+        new Paragraph(`Status: ${meeting.status || 'unknown'}`),
+      );
+
+      const snapshot = sessionHistory.find((item) => item.meetingId === meeting.id) || null;
+      if (snapshot) {
+        paragraphs.push(new Paragraph(`Snapshot captured: ${formatWhen(snapshot.capturedAt)}`));
+      }
+
+      paragraphs.push(
+        new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun('Written Content')] }),
+      );
+
+      const docs = snapshot && Array.isArray(snapshot.docs) ? snapshot.docs.slice() : [];
+      docs.sort((a, b) => {
+        if (a.type === b.type) {
+          return String(a.name || '').localeCompare(String(b.name || ''));
+        }
+        return a.type === 'shared' ? -1 : 1;
+      });
+
+      if (docs.length === 0) {
+        paragraphs.push(new Paragraph('No captured document snapshot found for this meeting.'));
+      } else {
+        docs.forEach((meetingDoc) => {
+          paragraphs.push(
+            new Paragraph({
+              heading: HeadingLevel.HEADING_3,
+              children: [
+                new TextRun(
+                  `${meetingDoc.type === 'shared' ? 'Shared Screen' : 'Personal Card'}: ${meetingDoc.name || 'Untitled'}`,
+                ),
+              ],
+            }),
+          );
+          if (meetingDoc.ownerUsername) {
+            paragraphs.push(new Paragraph(`Owner: ${meetingDoc.ownerUsername}`));
+          }
+
+          const text = cleanDocText(meetingDoc.text);
+          if (!text.trim()) {
+            paragraphs.push(new Paragraph('(No text content)'));
+          } else {
+            text.split('\n').forEach((line) => {
+              paragraphs.push(new Paragraph(line.length ? line : ' '));
+            });
+          }
+        });
+      }
+
+      if (index < meetings.length - 1) {
+        paragraphs.push(new Paragraph({ children: [new PageBreak()] }));
+      }
+    });
+
+    paragraphs.push(
+      new Paragraph({ children: [new PageBreak()] }),
+      new Paragraph({
+        heading: HeadingLevel.HEADING_1,
+        alignment: AlignmentType.LEFT,
+        children: [new TextRun('Participants')],
+      }),
+    );
+
+    if (participants.length === 0) {
+      paragraphs.push(new Paragraph('No participants recorded yet.'));
+    } else {
+      participants.forEach((participant, index) => {
+        paragraphs.push(
+          new Paragraph({ heading: HeadingLevel.HEADING_3, children: [new TextRun(`${index + 1}. ${participant.username}`)] }),
+          new Paragraph(`Meetings joined: ${participant.meetingsJoined}`),
+          new Paragraph(`Total joins: ${participant.totalJoinCount}`),
+          new Paragraph(`First joined: ${formatWhen(participant.firstJoinedAt)}`),
+          new Paragraph(`Last joined: ${formatWhen(participant.lastJoinedAt)}`),
+        );
+      });
+    }
+
+    const doc = new Document({
+      sections: [{ properties: {}, children: paragraphs }],
+    });
+
+    const buffer = await Packer.toBuffer(doc);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename=\"${filename}\"`);
+    res.status(200).send(buffer);
+    return;
+  }
+
+  res.status(400).json({ ok: false, error: 'Unsupported export format. Use json, csv, pdf, or docx.' });
 });
 
 const io = new Server(server, {
