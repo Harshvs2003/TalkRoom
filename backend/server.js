@@ -50,6 +50,14 @@ app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok', dbStatus });
 });
 
+app.get('/', (_req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    service: 'TalkRoom backend is running',
+    health: '/health',
+  });
+});
+
 let db = null;
 let readHosts = async () => [];
 let writeHosts = async () => {};
@@ -366,11 +374,6 @@ app.post('/api/private-rooms', authMiddleware, async (req, res) => {
   const joinPasscode = String(req.body?.joinPasscode || '');
   const hostDisplayName = String(req.body?.hostDisplayName || host.name).trim();
 
-  if (!meetingName) {
-    res.status(400).json({ ok: false, error: 'Meeting name is required' });
-    return;
-  }
-
   if (joinPasscode.length < 4) {
     res.status(400).json({ ok: false, error: 'Join passcode must be at least 4 characters' });
     return;
@@ -380,14 +383,16 @@ app.post('/api/private-rooms', authMiddleware, async (req, res) => {
   const roomCode = await createUniquePrivateRoomCode();
   const joinPasscodeHash = await bcrypt.hash(joinPasscode, BCRYPT_SALT_ROUNDS);
   const now = new Date().toISOString();
-  const firstMeeting = {
-    id: crypto.randomUUID(),
-    name: meetingName,
-    status: 'open',
-    startedAt: now,
-    closedAt: null,
-    participants: [],
-  };
+  const firstMeeting = meetingName
+    ? {
+        id: crypto.randomUUID(),
+        name: meetingName,
+        status: 'open',
+        startedAt: now,
+        closedAt: null,
+        participants: [],
+      }
+    : null;
 
   const newPrivateRoom = {
     id: crypto.randomUUID(),
@@ -401,12 +406,14 @@ app.post('/api/private-rooms', authMiddleware, async (req, res) => {
     updatedAt: now,
     bannedParticipants: [],
     sessionHistory: [],
-    meetings: [firstMeeting],
+    meetings: firstMeeting ? [firstMeeting] : [],
   };
 
   privateRooms.push(newPrivateRoom);
   await writePrivateRooms(privateRooms);
-  ensureRuntimeRoomFromPrivateRecord(newPrivateRoom);
+  if (firstMeeting) {
+    ensureRuntimeRoomFromPrivateRecord(newPrivateRoom);
+  }
 
   res.status(201).json({
     ok: true,
@@ -1121,6 +1128,23 @@ const emitUsersUpdate = (roomId) => {
     return;
   }
 
+  const socketIds = io.sockets.adapter.rooms.get(roomId);
+  if (socketIds) {
+    const liveUsers = [];
+    socketIds.forEach((socketId) => {
+      const roomSocket = io.sockets.sockets.get(socketId);
+      const username = normalizeUsername(roomSocket?.data?.username);
+      if (!username) {
+        return;
+      }
+      if (liveUsers.some((user) => user.username.toLowerCase() === username.toLowerCase())) {
+        return;
+      }
+      liveUsers.push({ socketId, username });
+    });
+    room.users = liveUsers;
+  }
+
   io.to(roomId).emit(
     'users-update',
     room.users.map((user) => user.username),
@@ -1132,6 +1156,23 @@ const emitRoomState = (roomId) => {
 
   if (!room) {
     return;
+  }
+
+  const socketIds = io.sockets.adapter.rooms.get(roomId);
+  if (socketIds) {
+    const liveUsers = [];
+    socketIds.forEach((socketId) => {
+      const roomSocket = io.sockets.sockets.get(socketId);
+      const username = normalizeUsername(roomSocket?.data?.username);
+      if (!username) {
+        return;
+      }
+      if (liveUsers.some((user) => user.username.toLowerCase() === username.toLowerCase())) {
+        return;
+      }
+      liveUsers.push({ socketId, username });
+    });
+    room.users = liveUsers;
   }
 
   io.to(roomId).emit('room-state', toPublicRoomState(room));
@@ -1511,6 +1552,9 @@ io.on('connection', (socket) => {
 
     room.users = room.users.filter((user) => user.socketId !== socket.id);
     room.users.push({ socketId: socket.id, username });
+    socket.data.roomId = roomId;
+    socket.data.username = username;
+    socket.data.hostId = joiningHostId;
 
     ensurePersonalDoc(room, username);
 
@@ -1520,10 +1564,6 @@ io.on('connection', (socket) => {
     console.log('SOCKET ROOMS:', Array.from(socket.rooms));
     console.log('User joined:', roomId, username);
     console.log('Users in room:', room.users.length);
-    socket.data.roomId = roomId;
-    socket.data.username = username;
-    socket.data.hostId = joiningHostId;
-
     emitUsersUpdate(roomId);
     emitRoomState(roomId);
 

@@ -223,6 +223,7 @@ function App() {
   const [hostAuthMessage, setHostAuthMessage] = useState('');
   const [privateRooms, setPrivateRooms] = useState<PrivateRoom[]>([]);
   const [privateRoomsLoading, setPrivateRoomsLoading] = useState(false);
+  const [privateWorkspaceNameInput, setPrivateWorkspaceNameInput] = useState('');
   const [privateRoomNameInput, setPrivateRoomNameInput] = useState('');
   const [privateRoomPasscodeInput, setPrivateRoomPasscodeInput] = useState('');
   const [newMeetingRoomId, setNewMeetingRoomId] = useState('');
@@ -1027,7 +1028,7 @@ function App() {
   }, [hostApiRequest]);
 
   const handleCreatePrivateRoom = useCallback(async () => {
-    if (!privateRoomNameInput.trim() || !privateRoomPasscodeInput) {
+    if (!privateWorkspaceNameInput.trim() || !privateRoomPasscodeInput) {
       setHostAuthMessage('Private room name and passcode are required');
       return;
     }
@@ -1039,6 +1040,7 @@ function App() {
       const data = await hostApiRequest('/api/private-rooms', {
         method: 'POST',
         body: JSON.stringify({
+          workspaceName: privateWorkspaceNameInput.trim(),
           meetingName: privateRoomNameInput.trim(),
           joinPasscode: privateRoomPasscodeInput,
           hostDisplayName: username.trim() || hostProfile?.name || 'Host',
@@ -1056,6 +1058,7 @@ function App() {
         setHostAuthMessage('Private room created');
       }
 
+      setPrivateWorkspaceNameInput('');
       setPrivateRoomNameInput('');
       setPrivateRoomPasscodeInput('');
     } catch (error) {
@@ -1064,7 +1067,7 @@ function App() {
     } finally {
       setHostAuthBusy(false);
     }
-  }, [hostApiRequest, hostProfile?.name, privateRoomNameInput, privateRoomPasscodeInput, username]);
+  }, [hostApiRequest, hostProfile?.name, privateRoomNameInput, privateRoomPasscodeInput, privateWorkspaceNameInput, username]);
 
   const handleStartNewMeeting = useCallback(
     async (privateRoomId: string) => {
@@ -1564,9 +1567,16 @@ function App() {
                       <p className="mb-2 text-sm font-semibold text-slate-700">Create Private Room (Permanent)</p>
                       <input
                         type="text"
+                        value={privateWorkspaceNameInput}
+                        onChange={(event) => setPrivateWorkspaceNameInput(event.target.value)}
+                        placeholder="Private room name (required)"
+                        className="mb-2 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
+                      />
+                      <input
+                        type="text"
                         value={privateRoomNameInput}
                         onChange={(event) => setPrivateRoomNameInput(event.target.value)}
-                        placeholder="First meeting name"
+                        placeholder="First meeting name (optional)"
                         className="mb-2 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none ring-brand-500 transition focus:ring-2"
                       />
                       <input
@@ -1584,6 +1594,9 @@ function App() {
                       >
                         {hostAuthBusy ? 'Please wait...' : 'Create 10-char Private Room'}
                       </button>
+                      <p className="mt-2 text-[11px] text-slate-500">
+                        You can create the private room now and start a meeting later from Current Room Joining.
+                      </p>
                     </div>
                   ) : null}
 
@@ -1593,7 +1606,8 @@ function App() {
                       {selectedPrivateRoom ? (
                         <>
                           <p className="text-xs text-slate-500">Code: {selectedPrivateRoom.roomCode}</p>
-                          <p className="text-xs text-slate-500">Current: {selectedPrivateRoom.currentMeeting?.name || 'No active meeting'}</p>
+                          <p className="text-xs text-slate-500">Private room: {selectedPrivateRoom.workspaceName}</p>
+                          <p className="text-xs text-slate-500">Current meeting: {selectedPrivateRoom.currentMeeting?.name || 'No active meeting'}</p>
                           <div className="mt-2 flex flex-wrap gap-2">
                             <button
                               type="button"
